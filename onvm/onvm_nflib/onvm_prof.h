@@ -15,6 +15,8 @@
 
 #define MZ_ONVM_PROF_STATS "MProc_onvm_prof_stats"
 #define ONVM_PROF_LOG_FILE "/tmp/onvm_prof_stats.csv"
+#define ONVM_PROF_MAX_SLOTS (RTE_MAX_LCORE + 1)
+#define ONVM_PROF_FALLBACK_SLOT RTE_MAX_LCORE
 
 enum onvm_prof_key {
         ONVM_PROF_UPFU_PACKET_HANDLER = 0,
@@ -29,7 +31,7 @@ struct onvm_prof_counter {
 } __rte_cache_aligned;
 
 struct onvm_prof_mem {
-        struct onvm_prof_counter counters[RTE_MAX_LCORE][ONVM_PROF_KEY_COUNT];
+        struct onvm_prof_counter counters[ONVM_PROF_MAX_SLOTS][ONVM_PROF_KEY_COUNT];
 };
 
 struct onvm_prof_scope {
@@ -38,6 +40,7 @@ struct onvm_prof_scope {
 };
 
 extern struct onvm_prof_mem *onvm_prof_stats;
+extern __thread unsigned onvm_prof_slot_id;
 
 int
 onvm_prof_init_mgr(void);
@@ -51,19 +54,25 @@ onvm_prof_log_periodic(void);
 void
 onvm_prof_cleanup(void);
 
+void
+onvm_prof_set_slot(unsigned slot_id);
+
 static inline void
 onvm_prof_record(enum onvm_prof_key key, uint64_t cycles) {
-        unsigned lcore_id;
+        unsigned slot_id;
         struct onvm_prof_counter *counter;
 
         if (unlikely(onvm_prof_stats == NULL || key >= ONVM_PROF_KEY_COUNT))
                 return;
 
-        lcore_id = rte_lcore_id();
-        if (unlikely(lcore_id >= RTE_MAX_LCORE))
-                return;
+        slot_id = onvm_prof_slot_id;
+        if (unlikely(slot_id >= ONVM_PROF_MAX_SLOTS)) {
+                slot_id = rte_lcore_id();
+                if (unlikely(slot_id >= ONVM_PROF_MAX_SLOTS))
+                        slot_id = ONVM_PROF_FALLBACK_SLOT;
+        }
 
-        counter = &onvm_prof_stats->counters[lcore_id][key];
+        counter = &onvm_prof_stats->counters[slot_id][key];
         counter->calls++;
         counter->cycles_total += cycles;
 

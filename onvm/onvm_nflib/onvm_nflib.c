@@ -599,6 +599,7 @@ onvm_nflib_thread_main_loop(void *arg) {
         nf->timeout_flag = false;
 
         onvm_threading_core_affinitize(nf->thread_info.core);
+        onvm_prof_set_slot(nf->thread_info.core);
 
         printf("Sending NF_READY message to manager...\n");
         ret = onvm_nflib_nf_ready(nf);
