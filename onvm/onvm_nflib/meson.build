@@ -5,6 +5,7 @@ sources = files(
     'onvm_nflib.c',
     'onvm_pkt_common.c',
     'onvm_pkt_helper.c',
+    'onvm_prof.c',
     'onvm_sc_common.c',
     'onvm_sc_mgr.c',
     'onvm_threading.c'

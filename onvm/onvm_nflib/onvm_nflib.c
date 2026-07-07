@@ -60,6 +60,7 @@
 
 #include "onvm_includes.h"
 #include "onvm_nflib.h"
+#include "onvm_prof.h"
 #include "onvm_sc_common.h"
 
 /**********************************Macros*************************************/
@@ -982,6 +983,9 @@ onvm_nflib_lookup_shared_structs(void) {
                 rte_exit(EXIT_FAILURE, "Cannot get onvm config\n");
         onvm_config = mz_onvm_config->addr;
         onvm_nflib_parse_config(onvm_config);
+
+        if (onvm_prof_init_nf() < 0)
+                rte_exit(EXIT_FAILURE, "Cannot get ONVM profiler stats\n");
 
         mz_scp = rte_memzone_lookup(MZ_SCP_INFO);
         if (mz_scp == NULL)

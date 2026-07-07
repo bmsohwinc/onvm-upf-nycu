@@ -42,6 +42,7 @@
 #include "onvm_flow_table.h"
 #include "onvm_nflib.h"
 #include "onvm_pkt_helper.h"
+#include "onvm_prof.h"
 #include "list.h"
 
 #include "upf_events.h"
@@ -485,6 +486,8 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
     if (pkt == NULL || meta == NULL) {
         return 0;
     }
+
+    ONVM_PROFILE_SCOPE(ONVM_PROF_UPFU_PACKET_HANDLER);
 
     /* Get Ethernet header */
     struct rte_ether_hdr *eth = onvm_pkt_ether_hdr(pkt);

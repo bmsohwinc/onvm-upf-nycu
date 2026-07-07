@@ -49,6 +49,7 @@
 
 #include "onvm_mgr/onvm_init.h"
 
+#include "onvm_prof.h"
 #include "upf/upf_context.h"
 
 /********************************Global variables*****************************/
@@ -158,6 +159,9 @@ init(int argc, char *argv[]) {
 
         /* get total number of ports */
         total_ports = rte_eth_dev_count_avail();
+
+        if (onvm_prof_init_mgr() < 0)
+                rte_exit(EXIT_FAILURE, "Cannot reserve memory zone for ONVM profiler stats\n");
 
         /* set up array for NF tx data */
         mz_nf = rte_memzone_reserve(MZ_NF_INFO, sizeof(*nfs) * MAX_NFS, rte_socket_id(), NO_FLAGS);
