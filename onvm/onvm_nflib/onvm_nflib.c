@@ -60,6 +60,7 @@
 
 #include "onvm_includes.h"
 #include "onvm_nflib.h"
+#include "onvm_pkt_trace_print.h"
 #include "onvm_prof.h"
 #include "onvm_sc_common.h"
 
@@ -1028,8 +1029,11 @@ onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx, 
 
         /* Give each packet to the user proccessing function */
         for (i = 0; i < nb_pkts; i++) {
+                ONVM_PKT_TS("nf.rx_dequeue", pkts[i]);
                 meta = onvm_get_pkt_meta((struct rte_mbuf *)pkts[i], pkt_meta_offset);
+                ONVM_PKT_TS("nf.handler_entry", pkts[i]);
                 ret_act = (*handler)((struct rte_mbuf *)pkts[i], meta, nf_local_ctx);
+                ONVM_PKT_TS("nf.handler_exit", pkts[i]);
                 /* NF returns 0 to return packets or 1 to buffer */
                 if (likely(ret_act == 0)) {
                         tx_buf.buffer[tx_buf.count++] = pkts[i];

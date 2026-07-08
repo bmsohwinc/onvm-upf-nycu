@@ -50,6 +50,7 @@
 
 #include "onvm_nf.h"
 #include "onvm_pkt.h"
+#include "onvm_pkt_trace_print.h"
 
 /**********************************Interfaces*********************************/
 
@@ -69,6 +70,7 @@ onvm_pkt_process_rx_batch(struct queue_mgr *rx_mgr, struct rte_mbuf *pkts[], uin
                 return;
 
         for (i = 0; i < rx_count; i++) {
+                ONVM_PKT_TS("mgr.rx_process_entry", pkts[i]);
                 meta = onvm_get_pkt_meta(pkts[i], onvm_config->dynfield_offset);
                 meta->src = 0;
                 meta->chain_index = 0;
@@ -92,6 +94,7 @@ onvm_pkt_process_rx_batch(struct queue_mgr *rx_mgr, struct rte_mbuf *pkts[], uin
                  */
 
                 (meta->chain_index)++;
+                ONVM_PKT_TS("mgr.enqueue_nf_call", pkts[i]);
                 onvm_pkt_enqueue_nf(rx_mgr, meta->destination, pkts[i], NULL);
         }
 
@@ -116,6 +119,8 @@ onvm_pkt_drop_batch(struct rte_mbuf **pkts, uint16_t size) {
         if (pkts == NULL)
                 return;
 
+        for (i = 0; i < size; i++)
+                ONVM_PKT_TS("mgr.drop_batch", pkts[i]);
         for (i = 0; i < size; i++)
                 rte_pktmbuf_free(pkts[i]);
 }

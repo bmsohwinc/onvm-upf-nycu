@@ -52,6 +52,7 @@
 #include "onvm_mgr.h"
 #include "onvm_nf.h"
 #include "onvm_pkt.h"
+#include "onvm_pkt_trace_print.h"
 #include "onvm_prof.h"
 #include "onvm_stats.h"
 
@@ -199,6 +200,9 @@ rx_thread_main(void *arg) {
 
                         /* Now process the NIC packets read */
                         if (likely(rx_count > 0)) {
+                                uint16_t j;
+                                for (j = 0; j < rx_count; j++)
+                                        ONVM_PKT_TS("mgr.rx_burst_done", pkts[j]);
                                 // If there is no running NF, we drop all the packets of the batch.
                                 if (!num_nfs) {
                                         onvm_pkt_drop_batch(pkts, rx_count);
@@ -242,6 +246,9 @@ tx_thread_main(void *arg) {
 
                         /* Now process the Client packets read */
                         if (likely(tx_count > 0)) {
+                                unsigned j;
+                                for (j = 0; j < tx_count; j++)
+                                        ONVM_PKT_TS("mgr.tx_dequeue_nf_txq", pkts[j]);
                                 onvm_pkt_process_tx_batch(tx_mgr, pkts, onvm_config->dynfield_offset, tx_count, nf);
                         }
                 }

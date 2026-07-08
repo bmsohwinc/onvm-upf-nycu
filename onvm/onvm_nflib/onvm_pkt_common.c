@@ -47,6 +47,7 @@
 ******************************************************************************/
 
 #include "onvm_pkt_common.h"
+#include "onvm_pkt_trace_print.h"
 
 /**********************Internal Functions Prototypes**************************/
 
@@ -161,12 +162,15 @@ onvm_pkt_flush_nf_queue(struct queue_mgr *tx_mgr, uint16_t nf_id, struct onvm_nf
 
         if (rte_ring_enqueue_bulk(nf->rx_q, (void **)nf_buf->buffer, nf_buf->count, NULL) == 0) {
                 for (i = 0; i < nf_buf->count; i++) {
+                        ONVM_PKT_TS("enqueue_nf_drop", nf_buf->buffer[i]);
                         onvm_pkt_drop(nf_buf->buffer[i]);
                 }
                 nf->stats.rx_drop += nf_buf->count;
                 if (source_nf != NULL)
                         source_nf->stats.tx_drop += nf_buf->count;
         } else {
+                for (i = 0; i < nf_buf->count; i++)
+                        ONVM_PKT_TS("enqueue_nf_done", nf_buf->buffer[i]);
                 nf->stats.rx += nf_buf->count;
                 if (source_nf != NULL)
                         source_nf->stats.tx += nf_buf->count;
@@ -223,9 +227,14 @@ onvm_pkt_flush_port_queue(struct queue_mgr *tx_mgr, uint16_t port) {
                 return;
 
         tx_stats = &(ports->tx_stats);
+        for (i = 0; i < port_buf->count; i++)
+                ONVM_PKT_TS("mgr.tx_burst_entry", port_buf->buffer[i]);
         sent = rte_eth_tx_burst(port, tx_mgr->id, port_buf->buffer, port_buf->count);
+        for (i = 0; i < sent; i++)
+                ONVM_PKT_TS("mgr.tx_burst_exit_sent", port_buf->buffer[i]);
         if (unlikely(sent < port_buf->count)) {
                 for (i = sent; i < port_buf->count; i++) {
+                        ONVM_PKT_TS("mgr.tx_burst_exit_drop", port_buf->buffer[i]);
                         onvm_pkt_drop(port_buf->buffer[i]);
                 }
                 tx_stats->tx_drop[port] += (port_buf->count - sent);
@@ -246,9 +255,12 @@ onvm_pkt_enqueue_tx_thread(struct packet_buf *pkt_buf, struct onvm_nf *nf) {
                      rte_ring_enqueue_bulk(nf->tx_q, (void **)pkt_buf->buffer, pkt_buf->count, NULL) == 0)) {
                 nf->stats.tx_drop += pkt_buf->count;
                 for (i = 0; i < pkt_buf->count; i++) {
+                        ONVM_PKT_TS("nf.enqueue_txq_drop", pkt_buf->buffer[i]);
                         rte_pktmbuf_free(pkt_buf->buffer[i]);
                 }
         } else {
+                for (i = 0; i < pkt_buf->count; i++)
+                        ONVM_PKT_TS("nf.enqueue_txq_done", pkt_buf->buffer[i]);
                 nf->stats.tx += pkt_buf->count;
         }
         pkt_buf->count = 0;
@@ -314,6 +326,7 @@ onvm_pkt_process_next_action(struct queue_mgr *tx_mgr, struct rte_mbuf *pkt, int
 
 static int
 onvm_pkt_drop(struct rte_mbuf *pkt) {
+        ONVM_PKT_TS("drop", pkt);
         rte_pktmbuf_free(pkt);
         if (pkt != NULL) {
                 return 1;
