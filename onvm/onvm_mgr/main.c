@@ -345,6 +345,8 @@ struct queue_mgr *rx_mgr[], struct wakeup_thread_context *wakeup_ctx[]) {
 /*******************************Main function*********************************/
 int
 main(int argc, char *argv[]) {
+        ONVM_STARTUP_TIMESTAMP("START", "ONVM_MGR");
+
         unsigned cur_lcore, rx_lcores, tx_lcores, wakeup_lcores;
         unsigned nfs_per_tx, nfs_per_wakeup_thread;
         unsigned i;

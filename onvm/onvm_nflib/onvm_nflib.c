@@ -360,6 +360,8 @@ onvm_nflib_init(int argc, char *argv[], const char *nf_tag, struct onvm_nf_local
         int ret, retval_eal, retval_parse, retval_final;
         int use_config = 0;
 
+        ONVM_STARTUP_TIMESTAMP("START", nf_tag);
+
         /* Check to see if a config file should be used */
         if (strcmp(argv[1], "-F") == 0) {
                 use_config = 1;

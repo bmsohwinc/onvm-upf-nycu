@@ -68,6 +68,7 @@
 #include <rte_atomic.h>
 #include <rte_branch_prediction.h>
 #include <rte_common.h>
+#include <rte_cycles.h>
 #include <rte_debug.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
@@ -89,5 +90,12 @@
 /******************************Internal headers*******************************/
 
 #include "onvm_common.h"
+
+/***********************************Macros************************************/
+
+#define ONVM_STARTUP_TIMESTAMP(event, role) do { \
+        printf("%s,%s,%" PRIu64 "\n", event, role, rte_get_tsc_cycles()); \
+        fflush(stdout); \
+} while (0)
 
 #endif  // _ONVM_INCLUDES_H_

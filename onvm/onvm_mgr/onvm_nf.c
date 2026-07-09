@@ -326,6 +326,7 @@ onvm_nf_ready(struct onvm_nf *nf) {
         num_nfs++;
         // Register this NF running within its service
         nf->status = NF_RUNNING;
+        ONVM_STARTUP_TIMESTAMP("READY", nf->tag);
         return 0;
 }
 
