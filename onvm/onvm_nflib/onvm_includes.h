@@ -93,9 +93,25 @@
 
 /***********************************Macros************************************/
 
+#ifndef ONVM_STARTUP_TRACE_PRINT
+#define ONVM_STARTUP_TRACE_PRINT 1
+#endif
+
+static inline uint64_t
+onvm_startup_trace_print_cycles_to_ns(uint64_t cycles) {
+        return (uint64_t)((__uint128_t)cycles * 1000000000ULL / rte_get_tsc_hz());
+}
+
+#if ONVM_STARTUP_TRACE_PRINT
 #define ONVM_STARTUP_TIMESTAMP(event, role) do { \
-        printf("%s,%s,%" PRIu64 "\n", event, role, rte_get_tsc_cycles()); \
-        fflush(stdout); \
+        uint64_t __onvm_startup_ts_tsc = rte_get_tsc_cycles(); \
+        fprintf(stderr, "ONVM_STARTUP_TS,%s,%s,%" PRIu64 ",%" PRIu64 ",%u\n", \
+                event, role, __onvm_startup_ts_tsc, \
+                onvm_startup_trace_print_cycles_to_ns(__onvm_startup_ts_tsc), rte_lcore_id()); \
+        fflush(stderr); \
 } while (0)
+#else
+#define ONVM_STARTUP_TIMESTAMP(event, role) do { (void)(event); (void)(role); } while (0)
+#endif
 
 #endif  // _ONVM_INCLUDES_H_
