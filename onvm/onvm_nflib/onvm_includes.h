@@ -99,7 +99,10 @@
 
 static inline uint64_t
 onvm_startup_trace_print_cycles_to_ns(uint64_t cycles) {
-        return (uint64_t)((__uint128_t)cycles * 1000000000ULL / rte_get_tsc_hz());
+        const uint64_t hz = rte_get_tsc_hz();
+        if (hz == 0)
+                return 0;
+        return (uint64_t)((__uint128_t)cycles * 1000000000ULL / hz);
 }
 
 #if ONVM_STARTUP_TRACE_PRINT
