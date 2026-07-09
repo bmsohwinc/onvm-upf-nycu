@@ -364,6 +364,7 @@ onvm_nflib_init(int argc, char *argv[], const char *nf_tag, struct onvm_nf_local
 
         /* Check to see if a config file should be used */
         if (strcmp(argv[1], "-F") == 0) {
+                ONVM_STARTUP_TIMESTAMP("CONFIG_PARSE_BEGIN", nf_tag);
                 use_config = 1;
                 cJSON *config = onvm_config_parse_file(argv[2]);
                 if (config == NULL) {
@@ -379,11 +380,14 @@ onvm_nflib_init(int argc, char *argv[], const char *nf_tag, struct onvm_nf_local
 
                 cJSON_Delete(config);
                 printf("LOADED CONFIG SUCCESFULLY\n");
+                ONVM_STARTUP_TIMESTAMP("CONFIG_PARSE_DONE", nf_tag);
         }
 
+        ONVM_STARTUP_TIMESTAMP("EAL_INIT_BEGIN", nf_tag);
         retval_eal = onvm_nflib_dpdk_init(argc, argv);
         if (retval_eal < 0)
                 return retval_eal;
+        ONVM_STARTUP_TIMESTAMP("EAL_INIT_DONE", nf_tag);
 
         /* Modify argc and argv to conform to getopt rules for parse_nflib_args */
         argc -= retval_eal;
@@ -394,13 +398,17 @@ onvm_nflib_init(int argc, char *argv[], const char *nf_tag, struct onvm_nf_local
         optind = 1;
 
         /* Lookup the info shared or created by the manager */
+        ONVM_STARTUP_TIMESTAMP("SHARED_LOOKUP_BEGIN", nf_tag);
         onvm_nflib_lookup_shared_structs();
+        ONVM_STARTUP_TIMESTAMP("SHARED_LOOKUP_DONE", nf_tag);
 
         /* Initialize the info struct */
         nf_init_cfg = onvm_nflib_init_nf_init_cfg(nf_tag);
 
+        ONVM_STARTUP_TIMESTAMP("PARSE_ARGS_BEGIN", nf_tag);
         if ((retval_parse = onvm_nflib_parse_args(argc, argv, nf_init_cfg)) < 0)
                 rte_exit(EXIT_FAILURE, "Invalid command-line arguments\n");
+        ONVM_STARTUP_TIMESTAMP("PARSE_ARGS_DONE", nf_tag);
 
         /* Reset getopt global variables opterr and optind to their default values */
         opterr = 0;
@@ -416,11 +424,14 @@ onvm_nflib_init(int argc, char *argv[], const char *nf_tag, struct onvm_nf_local
          */
         retval_final = (retval_eal + retval_parse) - 1;
 
+        ONVM_STARTUP_TIMESTAMP("START_NF_BEGIN", nf_tag);
         if ((ret = onvm_nflib_start_nf(nf_local_ctx, nf_init_cfg)) < 0)
                 return ret;
+        ONVM_STARTUP_TIMESTAMP("START_NF_DONE", nf_tag);
 
         /* Save the nf specifc function table */
         nf_local_ctx->nf->function_table = nf_function_table;
+        ONVM_STARTUP_TIMESTAMP("NFLIB_INIT_DONE", nf_tag);
 
         // Set to 3 because that is the bare minimum number of arguments, the config file will increase this number
         if (use_config) {
@@ -458,14 +469,17 @@ onvm_nflib_start_nf(struct onvm_nf_local_ctx *nf_local_ctx, struct onvm_nf_init_
         /* Tell the manager we're ready to recieve packets */
         startup_msg->msg_type = MSG_NF_STARTING;
         startup_msg->msg_data = nf_init_cfg;
+        ONVM_STARTUP_TIMESTAMP("NF_START_MSG_ENQUEUE_BEGIN", nf_init_cfg->tag);
         if (rte_ring_enqueue(mgr_msg_queue, startup_msg) < 0) {
                 rte_mempool_put(nf_init_cfg_mp, nf_init_cfg);  // give back mermory
                 rte_mempool_put(nf_msg_pool, startup_msg);
                 rte_exit(EXIT_FAILURE, "Cannot send nf_init_cfg to manager");
         }
+        ONVM_STARTUP_TIMESTAMP("NF_START_MSG_ENQUEUE_DONE", nf_init_cfg->tag);
 
         /* Wait for a NF id to be assigned by the manager */
         RTE_LOG(INFO, APP, "Waiting for manager to assign an ID...\n");
+        ONVM_STARTUP_TIMESTAMP("NF_ID_WAIT_BEGIN", nf_init_cfg->tag);
         for (; nf_init_cfg->status == (uint16_t)NF_WAITING_FOR_ID;) {
                 sleep(1);
                 if (!rte_atomic16_read(&nf_local_ctx->keep_running)) {
@@ -482,6 +496,7 @@ onvm_nflib_start_nf(struct onvm_nf_local_ctx *nf_local_ctx, struct onvm_nf_init_
                         return ONVM_SIGNAL_TERMINATION;
                 }
         }
+        ONVM_STARTUP_TIMESTAMP("NF_ID_WAIT_DONE", nf_init_cfg->tag);
 
         /* This NF is trying to declare an ID already in use. */
         if (nf_init_cfg->status == NF_ID_CONFLICT) {
@@ -567,6 +582,7 @@ onvm_nflib_start_nf(struct onvm_nf_local_ctx *nf_local_ctx, struct onvm_nf_init_
                                      "enabled, this will hurt performance, proceed with caution\n");
 
         RTE_LOG(INFO, APP, "Finished Process Init.\n");
+        ONVM_STARTUP_TIMESTAMP("NF_PROCESS_INIT_DONE", nf->tag);
 
         return 0;
 }
@@ -576,9 +592,12 @@ onvm_nflib_run(struct onvm_nf_local_ctx *nf_local_ctx) {
         int ret;
 
         pthread_t main_loop_thread;
+        ONVM_STARTUP_TIMESTAMP("RUN_THREAD_CREATE_BEGIN", nf_local_ctx->nf->tag);
         if ((ret = pthread_create(&main_loop_thread, NULL, onvm_nflib_thread_main_loop, (void *)nf_local_ctx)) < 0) {
                 rte_exit(EXIT_FAILURE, "Failed to spawn main loop thread, error %d", ret);
         }
+        ONVM_STARTUP_TIMESTAMP("RUN_THREAD_CREATE_DONE", nf_local_ctx->nf->tag);
+        ONVM_STARTUP_TIMESTAMP("RUN_THREAD_JOIN_BEGIN", nf_local_ctx->nf->tag);
         if ((ret = pthread_join(main_loop_thread, NULL)) < 0) {
                 rte_exit(EXIT_FAILURE, "Failed to join with main loop thread, error %d", ret);
         }
@@ -599,10 +618,14 @@ onvm_nflib_thread_main_loop(void *arg) {
         nf = nf_local_ctx->nf;
         nf->timeout_flag = false;
 
+        ONVM_STARTUP_TIMESTAMP("MAIN_LOOP_THREAD_ENTER", nf->tag);
         onvm_threading_core_affinitize(nf->thread_info.core);
+        ONVM_STARTUP_TIMESTAMP("CORE_AFFINITIZE_DONE", nf->tag);
 
         printf("Sending NF_READY message to manager...\n");
+        ONVM_STARTUP_TIMESTAMP("NF_READY_SEND_BEGIN", nf->tag);
         ret = onvm_nflib_nf_ready(nf);
+        ONVM_STARTUP_TIMESTAMP("READY_RECEIVED", nf->tag);
         if (ret != 0)
                 rte_exit(EXIT_FAILURE, "Unable to message manager\n");
 
@@ -617,12 +640,16 @@ onvm_nflib_thread_main_loop(void *arg) {
         }
 
         /* Run the setup function (this might send pkts so done after the state change) */
-        if (nf->function_table->setup != NULL)
+        if (nf->function_table->setup != NULL) {
+                ONVM_STARTUP_TIMESTAMP("SETUP_BEGIN", nf->tag);
                 nf->function_table->setup(nf_local_ctx);
+                ONVM_STARTUP_TIMESTAMP("SETUP_DONE", nf->tag);
+        }
 
         start_time = rte_get_tsc_cycles();
         uint64_t last_time_get_pkt = rte_get_tsc_cycles();
         int init_timeout = 0;
+        ONVM_STARTUP_TIMESTAMP("EVENT_LOOP_START", nf->tag);
         for (;rte_atomic16_read(&nf_local_ctx->keep_running) && rte_atomic16_read(&main_nf_local_ctx->keep_running);) {
                 /* Possibly sleep if in shared core mode, otherwise continue */
                 if (ONVM_NF_SHARE_CORES) {

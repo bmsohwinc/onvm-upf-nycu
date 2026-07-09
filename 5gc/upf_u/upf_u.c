@@ -836,14 +836,19 @@ main(int argc, char *argv[]) {
     int arg_offset;
     struct onvm_nf_local_ctx *nf_local_ctx;
     struct onvm_nf_function_table *nf_function_table;
+    ONVM_STARTUP_TIMESTAMP("UPF_U_MAIN_ENTER", NF_TAG);
     UTLT_SetLogLevel("warning"); // temporary default before config is loaded
 
     nf_local_ctx = onvm_nflib_init_nf_local_ctx();
+    ONVM_STARTUP_TIMESTAMP("UPF_U_LOCAL_CTX_DONE", NF_TAG);
     onvm_nflib_start_signal_handler(nf_local_ctx, NULL);
+    ONVM_STARTUP_TIMESTAMP("UPF_U_SIGNAL_HANDLER_DONE", NF_TAG);
     nf_function_table = onvm_nflib_init_nf_function_table();
     nf_function_table->pkt_handler = &packet_handler;
     nf_function_table->msg_handler = &msg_handler;
+    ONVM_STARTUP_TIMESTAMP("UPF_U_FUNCTION_TABLE_DONE", NF_TAG);
 
+    ONVM_STARTUP_TIMESTAMP("UPF_U_NFLIB_INIT_BEGIN", NF_TAG);
     if ((arg_offset = onvm_nflib_init(argc, argv, NF_TAG, nf_local_ctx, nf_function_table)) < 0) {
         onvm_nflib_stop(nf_local_ctx);
         if (arg_offset == ONVM_SIGNAL_TERMINATION) {
@@ -853,10 +858,12 @@ main(int argc, char *argv[]) {
             rte_exit(EXIT_FAILURE, "Failed ONVM init\n");
         }
     }
+    ONVM_STARTUP_TIMESTAMP("UPF_U_NFLIB_INIT_DONE", NF_TAG);
 
     /* Initialize dynamic field offset */
     struct onvm_configuration *onvm_config = onvm_nflib_get_onvm_config();
     nf_local_ctx->nf->dynfield_offset = onvm_config->dynfield_offset;
+    ONVM_STARTUP_TIMESTAMP("UPF_U_DYNFIELD_DONE", NF_TAG);
 
     const char *config_path = "config/upf_u.yaml";
 
@@ -865,37 +872,62 @@ main(int argc, char *argv[]) {
     }
 
     printf("[UPF-U] Using config: %s\n", config_path);
+    ONVM_STARTUP_TIMESTAMP("UPF_U_CONFIG_LOAD_BEGIN", NF_TAG);
     if (UpfU_LoadAndParseConfig(config_path) != 0) {
         rte_exit(EXIT_FAILURE, "Failed to load/parse UPF-U YAML config.\n");
     }
+    ONVM_STARTUP_TIMESTAMP("UPF_U_CONFIG_LOAD_DONE", NF_TAG);
 
     UTLT_SetLogLevel(g_log_level);
     printf("[UPF-U] Log level: %s\n", g_log_level);
+    ONVM_STARTUP_TIMESTAMP("UPF_U_LOG_LEVEL_DONE", NF_TAG);
 
+    ONVM_STARTUP_TIMESTAMP("UPF_U_CLS_CTRL_INIT_BEGIN", NF_TAG);
     if (UpfClsCtrlInit() < 0) {
         rte_exit(EXIT_FAILURE, "CLS_CTRL memzone init failed\n");
     }
+    ONVM_STARTUP_TIMESTAMP("UPF_U_CLS_CTRL_INIT_DONE", NF_TAG);
 
+    ONVM_STARTUP_TIMESTAMP("UPF_U_SESS_BUF_INIT_BEGIN", NF_TAG);
     if (UpfSessBufInit() < 0) {
         rte_exit(EXIT_FAILURE, "SESS_BUF memzone init failed\n");
     }
+    ONVM_STARTUP_TIMESTAMP("UPF_U_SESS_BUF_INIT_DONE", NF_TAG);
 
     // Initialize L2 addresses, must be done after config is loaded (UpfU_LoadAndParseConfig)
+    ONVM_STARTUP_TIMESTAMP("UPF_U_L2_ADDRS_INIT_BEGIN", NF_TAG);
     init_l2_addrs();
+    ONVM_STARTUP_TIMESTAMP("UPF_U_L2_ADDRS_INIT_DONE", NF_TAG);
 
     // trTCM
+    ONVM_STARTUP_TIMESTAMP("UPF_U_TRTCM_TABLES_BEGIN", NF_TAG);
     trtcmConfigFlowTables();
+    ONVM_STARTUP_TIMESTAMP("UPF_U_TRTCM_TABLES_DONE", NF_TAG);
+    ONVM_STARTUP_TIMESTAMP("UPF_U_UE_TABLE_INIT_BEGIN", NF_TAG);
     initUeTable();
+    ONVM_STARTUP_TIMESTAMP("UPF_U_UE_TABLE_INIT_DONE", NF_TAG);
+    ONVM_STARTUP_TIMESTAMP("UPF_U_UE_HASH_INIT_BEGIN", NF_TAG);
     ueHashInit();
+    ONVM_STARTUP_TIMESTAMP("UPF_U_UE_HASH_INIT_DONE", NF_TAG);
 
+    ONVM_STARTUP_TIMESTAMP("UPF_U_SESSION_POOL_INIT_BEGIN", NF_TAG);
     UpfSessionPoolInit();
+    ONVM_STARTUP_TIMESTAMP("UPF_U_SESSION_POOL_INIT_DONE", NF_TAG);
+    ONVM_STARTUP_TIMESTAMP("UPF_U_UEIP_MAP_INIT_BEGIN", NF_TAG);
     UeIpToUpfSessionMapInit();
+    ONVM_STARTUP_TIMESTAMP("UPF_U_UEIP_MAP_INIT_DONE", NF_TAG);
+    ONVM_STARTUP_TIMESTAMP("UPF_U_TEID_MAP_INIT_BEGIN", NF_TAG);
     TeidToUpfSessionMapInit();
+    ONVM_STARTUP_TIMESTAMP("UPF_U_TEID_MAP_INIT_DONE", NF_TAG);
 
     /* ARP module init */
+    ONVM_STARTUP_TIMESTAMP("UPF_U_ARP_INIT_BEGIN", NF_TAG);
     if (upf_arp_init() < 0) {
         rte_exit(EXIT_FAILURE, "failed to init ARP module\n");
     }
+    ONVM_STARTUP_TIMESTAMP("UPF_U_ARP_INIT_DONE", NF_TAG);
+
+    ONVM_STARTUP_TIMESTAMP("NFLIB_RUN_CALLING", NF_TAG);
 
     onvm_nflib_run(nf_local_ctx);
 
