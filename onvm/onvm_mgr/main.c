@@ -482,6 +482,7 @@ main(int argc, char *argv[]) {
                 }
         }
         /* Master thread handles statistics and NF management */
+        ONVM_STARTUP_TIMESTAMP("READY", "ONVM_MGR");
         master_thread_main();
         onvm_main_free(tx_lcores,rx_lcores, tx_mgr, rx_mgr, wakeup_ctx);
         return 0;
