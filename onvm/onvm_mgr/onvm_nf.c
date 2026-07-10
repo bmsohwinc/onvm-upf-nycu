@@ -312,6 +312,7 @@ onvm_nf_start(struct onvm_nf_init_cfg *nf_init_cfg) {
 
         // Let the NF continue its init process
         nf_init_cfg->status = NF_STARTING;
+        ONVM_STARTUP_TIMESTAMP("NF_ID_ASSIGNED", nf_init_cfg->tag);
         return 0;
 }
 

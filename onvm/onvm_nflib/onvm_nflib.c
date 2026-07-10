@@ -481,7 +481,7 @@ onvm_nflib_start_nf(struct onvm_nf_local_ctx *nf_local_ctx, struct onvm_nf_init_
         RTE_LOG(INFO, APP, "Waiting for manager to assign an ID...\n");
         ONVM_STARTUP_TIMESTAMP("NF_ID_WAIT_BEGIN", nf_init_cfg->tag);
         for (; nf_init_cfg->status == (uint16_t)NF_WAITING_FOR_ID;) {
-                sleep(1);
+                usleep(50000);
                 if (!rte_atomic16_read(&nf_local_ctx->keep_running)) {
                         /* Wait because we sent a message to the onvm_mgr */
                         for (i = 0; i < NF_TERM_INIT_ITER_TIMES && nf_init_cfg->status != NF_STARTING; i++) {
@@ -742,7 +742,7 @@ onvm_nflib_nf_ready(struct onvm_nf *nf) {
 
         /* Don't start running before the onvm_mgr handshake is finished */
         while (nf->status != NF_RUNNING) {
-                sleep(1);
+                usleep(50000);
         }
 
         return 0;
