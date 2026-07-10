@@ -107,7 +107,7 @@ master_thread_main(void) {
                 onvm_nf_check_status();
                 if (stats_destination != ONVM_STATS_NONE)
                         onvm_stats_display_all(sleeptime, verbosity_level);
-                onvm_prof_log_periodic();
+                onvm_loop_prof_log_periodic();
 
                 if (time_to_live && unlikely((rte_get_tsc_cycles() - start_time) * TIME_TTL_MULTIPLIER /
                                              rte_get_timer_hz() >= time_to_live)) {
@@ -129,6 +129,7 @@ master_thread_main(void) {
         /* Close out file references and things */
         onvm_stats_cleanup();
         onvm_prof_cleanup();
+        onvm_loop_prof_cleanup();
 
 #ifdef RTE_LIBRTE_PDUMP
         rte_pdump_uninit();

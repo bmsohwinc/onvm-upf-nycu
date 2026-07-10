@@ -162,6 +162,8 @@ init(int argc, char *argv[]) {
 
         if (onvm_prof_init_mgr() < 0)
                 rte_exit(EXIT_FAILURE, "Cannot reserve memory zone for ONVM profiler stats\n");
+        if (onvm_loop_prof_init_mgr() < 0)
+                rte_exit(EXIT_FAILURE, "Cannot reserve memory zone for ONVM loop profiler stats\n");
 
         /* set up array for NF tx data */
         mz_nf = rte_memzone_reserve(MZ_NF_INFO, sizeof(*nfs) * MAX_NFS, rte_socket_id(), NO_FLAGS);

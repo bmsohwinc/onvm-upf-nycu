@@ -165,7 +165,7 @@ onvm_nflib_parse_args(int argc, char *argv[], struct onvm_nf_init_cfg *nf_init_c
  */
 static inline uint16_t
 onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx,
-                           nf_pkt_handler_fn handler, int pkt_meta_offset) __attribute__((always_inline));
+                           nf_pkt_handler_fn handler, int pkt_meta_offset, struct onvm_nf *nf) __attribute__((always_inline));
 
 /*
  * Check if there is a message available for this NF and process it
@@ -593,6 +593,8 @@ onvm_nflib_thread_main_loop(void *arg) {
         struct onvm_nf *nf;
         uint16_t nb_pkts_added;
         uint64_t start_time;
+        uint64_t loop_start_cycles;
+        uint64_t prof_start_cycles;
         int ret;
 
         nf_local_ctx = (struct onvm_nf_local_ctx *)arg;
@@ -601,6 +603,7 @@ onvm_nflib_thread_main_loop(void *arg) {
 
         onvm_threading_core_affinitize(nf->thread_info.core);
         onvm_prof_set_slot(nf->thread_info.core);
+        onvm_loop_prof_register_nf(nf);
 
         printf("Sending NF_READY message to manager...\n");
         ret = onvm_nflib_nf_ready(nf);
@@ -625,38 +628,58 @@ onvm_nflib_thread_main_loop(void *arg) {
         uint64_t last_time_get_pkt = rte_get_tsc_cycles();
         int init_timeout = 0;
         for (;rte_atomic16_read(&nf_local_ctx->keep_running) && rte_atomic16_read(&main_nf_local_ctx->keep_running);) {
+                loop_start_cycles = ONVM_LOOP_PROF_BEGIN();
+
                 /* Possibly sleep if in shared core mode, otherwise continue */
                 if (ONVM_NF_SHARE_CORES) {
                         if (unlikely(rte_ring_count(nf->rx_q) == 0) && likely(rte_ring_count(nf->msg_q) == 0)) {
                                 rte_atomic16_set(nf->shared_core.sleep_state, 1);
+                                prof_start_cycles = ONVM_LOOP_PROF_BEGIN();
                                 sem_wait(nf->shared_core.nf_mutex);
+                                ONVM_LOOP_PROF_END(nf, ONVM_LOOP_PROF_SHARED_CORE_WAIT, prof_start_cycles);
                         }
                 }
 
+                prof_start_cycles = ONVM_LOOP_PROF_BEGIN();
                 nb_pkts_added =
-                        onvm_nflib_dequeue_packets((void **)pkts, nf_local_ctx, nf->function_table->pkt_handler, onvm_config->dynfield_offset);
+                        onvm_nflib_dequeue_packets((void **)pkts, nf_local_ctx, nf->function_table->pkt_handler, onvm_config->dynfield_offset, nf);
+                ONVM_LOOP_PROF_END(nf, ONVM_LOOP_PROF_DEQUEUE_PACKETS, prof_start_cycles);
 
                 /* TODO: Fix up the segment fault caused by timeout trigger */
                 if (likely(nb_pkts_added > 0)) {
+                        prof_start_cycles = ONVM_LOOP_PROF_BEGIN();
                         onvm_pkt_process_tx_batch(nf->nf_tx_mgr, pkts, onvm_config->dynfield_offset, nb_pkts_added, nf);
+                        ONVM_LOOP_PROF_END(nf, ONVM_LOOP_PROF_PROCESS_TX_BATCH, prof_start_cycles);
                         init_timeout = 1;
                         last_time_get_pkt = rte_get_tsc_cycles();
                 } else if(nb_pkts_added == 0 && nf->timeout_flag) {
                         if (init_timeout && unlikely((rte_get_tsc_cycles() - last_time_get_pkt) * TIME_TTL_MULTIPLIER * 1000000000 / rte_get_timer_hz() >= 20000)) {
                                 // printf("Force to trigger timeout\n");
+                                prof_start_cycles = ONVM_LOOP_PROF_BEGIN();
                                 (*nf->function_table->pkt_handler)(NULL, NULL, nf_local_ctx);
+                                ONVM_LOOP_PROF_END(nf, ONVM_LOOP_PROF_TIMEOUT_HANDLER, prof_start_cycles);
                         }
                 }
 
                 /* Flush the packet buffers */
+                prof_start_cycles = ONVM_LOOP_PROF_BEGIN();
                 onvm_pkt_enqueue_tx_thread(nf->nf_tx_mgr->to_tx_buf, nf);
+                ONVM_LOOP_PROF_END(nf, ONVM_LOOP_PROF_ENQUEUE_TX_THREAD, prof_start_cycles);
+                prof_start_cycles = ONVM_LOOP_PROF_BEGIN();
                 onvm_pkt_flush_all_nfs(nf->nf_tx_mgr, nf);
+                ONVM_LOOP_PROF_END(nf, ONVM_LOOP_PROF_FLUSH_ALL_NFS, prof_start_cycles);
 
+                prof_start_cycles = ONVM_LOOP_PROF_BEGIN();
                 onvm_nflib_dequeue_messages(nf_local_ctx);
+                ONVM_LOOP_PROF_END(nf, ONVM_LOOP_PROF_DEQUEUE_MESSAGES, prof_start_cycles);
                 if (nf->function_table->user_actions != ONVM_NO_CALLBACK) {
+                        int keep_running;
+
+                        prof_start_cycles = ONVM_LOOP_PROF_BEGIN();
+                        keep_running = !(*nf->function_table->user_actions)(nf_local_ctx);
+                        ONVM_LOOP_PROF_END(nf, ONVM_LOOP_PROF_USER_ACTIONS, prof_start_cycles);
                         rte_atomic16_set(&nf_local_ctx->keep_running,
-                                         !(*nf->function_table->user_actions)(nf_local_ctx) &&
-                                         rte_atomic16_read(&nf_local_ctx->keep_running));
+                                         keep_running && rte_atomic16_read(&nf_local_ctx->keep_running));
                 }
 
                 if (nf->flags.time_to_live && unlikely((rte_get_tsc_cycles() - start_time) *
@@ -669,6 +692,7 @@ onvm_nflib_thread_main_loop(void *arg) {
                         printf("Packet limit exceeded, shutting down\n");
                         rte_atomic16_set(&nf_local_ctx->keep_running, 0);
                 }
+                ONVM_LOOP_PROF_END(nf, ONVM_LOOP_PROF_MAIN_LOOP, loop_start_cycles);
         }
         return NULL;
 }
@@ -988,6 +1012,8 @@ onvm_nflib_lookup_shared_structs(void) {
 
         if (onvm_prof_init_nf() < 0)
                 rte_exit(EXIT_FAILURE, "Cannot get ONVM profiler stats\n");
+        if (onvm_loop_prof_init_nf() < 0)
+                rte_exit(EXIT_FAILURE, "Cannot get ONVM loop profiler stats\n");
 
         mz_scp = rte_memzone_lookup(MZ_SCP_INFO);
         if (mz_scp == NULL)
@@ -1009,14 +1035,15 @@ onvm_nflib_parse_config(struct onvm_configuration *config) {
 }
 
 static inline uint16_t
-onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx, nf_pkt_handler_fn handler, int pkt_meta_offset) {
-        struct onvm_nf *nf;
+onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx, nf_pkt_handler_fn handler, int pkt_meta_offset, struct onvm_nf *nf) {
         struct onvm_pkt_meta *meta;
         uint16_t i, nb_pkts;
+        uint64_t prof_start_cycles;
         struct packet_buf tx_buf;
         int ret_act;
 
-        nf = nf_local_ctx->nf;
+        if (nf == NULL)
+                nf = nf_local_ctx->nf;
 
         /* Dequeue all packets in ring up to max possible. */
         nb_pkts = rte_ring_dequeue_burst(nf->rx_q, pkts, PACKET_READ_SIZE, NULL);
@@ -1032,7 +1059,9 @@ onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx, 
                 ONVM_PKT_TS("nf.rx_dequeue", pkts[i]);
                 meta = onvm_get_pkt_meta((struct rte_mbuf *)pkts[i], pkt_meta_offset);
                 ONVM_PKT_TS("nf.handler_entry", pkts[i]);
+                prof_start_cycles = ONVM_LOOP_PROF_BEGIN();
                 ret_act = (*handler)((struct rte_mbuf *)pkts[i], meta, nf_local_ctx);
+                ONVM_LOOP_PROF_END(nf, ONVM_LOOP_PROF_PACKET_HANDLER, prof_start_cycles);
                 ONVM_PKT_TS("nf.handler_exit", pkts[i]);
                 /* NF returns 0 to return packets or 1 to buffer */
                 if (likely(ret_act == 0)) {

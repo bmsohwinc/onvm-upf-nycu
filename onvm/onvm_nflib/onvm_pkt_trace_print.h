@@ -14,7 +14,7 @@
 #include <rte_lcore.h>
 
 #ifndef ONVM_PKT_TRACE_PRINT
-#define ONVM_PKT_TRACE_PRINT 1
+#define ONVM_PKT_TRACE_PRINT 0
 #endif
 
 static inline uint64_t
