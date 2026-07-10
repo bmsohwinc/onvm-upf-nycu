@@ -101,7 +101,7 @@ master_thread_main(void) {
 
         onvm_stats_init(verbosity_level);
         /* Loop forever: sleep always returns 0 or <= param */
-        while (main_keep_running && usleep(100000); <= sleeptime) {
+        while (main_keep_running && usleep(100000) <= sleeptime) {
                 onvm_nf_check_status();
                 if (stats_destination != ONVM_STATS_NONE)
                         onvm_stats_display_all(sleeptime, verbosity_level);
