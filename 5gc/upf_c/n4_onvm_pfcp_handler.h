@@ -48,6 +48,7 @@ void UpfN4HandleAssociationUpdateRequest(PfcpXact *xact, PFCPAssociationUpdateRe
 void UpfN4HandleAssociationReleaseRequest(PfcpXact *xact, PFCPAssociationReleaseRequest *request);
 void UpfN4HandleHeartbeatRequest(PfcpXact *xact, HeartbeatRequest *request);
 void UpfN4HandleHeartbeatResponse(PfcpXact *xact, HeartbeatResponse *response);
+void UpfClsOnAckFree(uint32_t ver, uint16_t service_id);
 
 #ifdef __cplusplus
 }

@@ -710,6 +710,10 @@ Status PfcpXactReceive(PfcpNode *gnode, PfcpHeader *header, PfcpXact **xact) {
             GetIP(&gnode->sock->remoteAddr), GetPort(&gnode->sock->remoteAddr));
 
     status = PfcpXactUpdateRx(newXact, header->type);
+    /* A duplicate was replayed/discarded. Keep its cached response and timers
+     * alive so another retry still finds the same transaction. */
+    if (status == STATUS_EAGAIN)
+        return status;
     if (status != STATUS_OK) {
         IndexFree(&pfcpXactPool, newXact);
         return status;

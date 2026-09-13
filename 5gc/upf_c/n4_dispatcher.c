@@ -91,30 +91,28 @@ void UpfDispatcher(const Event *event) {
 
             if (pfcpMessage->header.seidP) {
 
-                // if SEID presence
-                if (!pfcpMessage->header.seid) {
-                    // without SEID
-                    if (pfcpMessage->header.type == PFCP_SESSION_ESTABLISHMENT_REQUEST) {
-                        session = UpfSessionAddByMessage(pfcpMessage);
-                    } else {
-                        UTLT_Assert(0, goto freeBuf,
-                                    "no SEID but not SESSION ESTABLISHMENT");
-                    }
-                } else {
-                    // with SEID
+                if (pfcpMessage->header.seid) {
                     session = UpfSessionFindBySeid(pfcpMessage->header.seid);
+                    UTLT_Assert(session, goto freeBuf, "Session not found");
+                } else {
+                    UTLT_Assert(pfcpMessage->header.type == PFCP_SESSION_ESTABLISHMENT_REQUEST,
+                                goto freeBuf, "no SEID but not SESSION ESTABLISHMENT");
                 }
 
+                /* Let PFCP replay a cached response before allocating a session/worker. */
+                PfcpNode *peer = session && pfcpMessage->header.type == PFCP_SESSION_REPORT_RESPONSE
+                                    ? session->pfcpNode : upf;
+                status = PfcpXactReceive(peer, &pfcpMessage->header, &xact);
+                if (status == STATUS_EAGAIN) goto freeBuf;
+                UTLT_Assert(status == STATUS_OK, goto freeBuf, "PFCP transaction receive failed");
+
+                if (!session) session = UpfSessionAddByMessage(pfcpMessage);
                 UTLT_Assert(session, goto freeBuf,
                             "do not find / establish session");
 
                 if (pfcpMessage->header.type != PFCP_SESSION_REPORT_RESPONSE) {
                     session->pfcpNode = upf;
                 }
-
-                status = PfcpXactReceive(session->pfcpNode,
-                                         &pfcpMessage->header, &xact);
-                UTLT_Assert(status == STATUS_OK, goto freeBuf, "");
             } else {
                 status = PfcpXactReceive(upf, &pfcpMessage->header, &xact);
                 UTLT_Assert(status == STATUS_OK, goto freeBuf, "");

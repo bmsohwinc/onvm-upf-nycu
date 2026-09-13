@@ -342,37 +342,60 @@ UpfQER *UpfQERFindByID(UpfSession *session, uint16_t id){
 UpfSession *UpfSessionAdd(PfcpUeIpAddr *ueIp,
                           PfcpFTeid *teid,
                           uint8_t *dnn,
+                          uint16_t dnn_len,
                           uint8_t pdnType) {
     UTLT_Assert(teid, return NULL, "teid is null");
     UTLT_Assert(ueIp, return NULL, "ueIp");
     UpfSession *session = NULL;
 
+    UTLT_Assert(pdnType == PFCP_PDN_TYPE_IPV4 && ueIp->v4 && !ueIp->v6,
+                return NULL, "Only IPv4 sessions are supported");
+    UTLT_Assert(!teid->ch && teid->v4 && !teid->v6, return NULL,
+                "An explicit IPv4 F-TEID is required until UPF TEID allocation is enabled");
+    UTLT_Assert(dnn && dnn_len && dnn_len <= MAX_DNN_LEN, return NULL, "Invalid DNN");
+    uint32_t ue_key = rte_be_to_cpu_32(ueIp->addr4.s_addr);
+    uint32_t teid_key = rte_be_to_cpu_32(teid->teid);
+    UTLT_Assert(!UpfSessionFindByUeIP(ue_key) && !UpfSessionFindByTeid(teid_key),
+                return NULL, "UE IP or TEID is already assigned; existing session is unchanged");
+    UTLT_Assert(!Self()->workerCount || Self()->nextWorker < Self()->workerCount,
+                return NULL, "No unused UPF-U worker; restart all NFs to reset demo assignments");
+
     session = UpfSessionAlloc(g_sessionIdPool);
     // UTLT_Debug("Session return from UpfSessionAlloc: %p\n", session);
     UTLT_Assert(session, return NULL, "session alloc error");
 
-    strncpy((char*)session->pdn.dnn, (char*)dnn, MAX_DNN_LEN + 1);
+    memcpy(session->pdn.dnn, dnn, dnn_len);
+    session->pdn.dnn[dnn_len] = '\0';
 
     session->pdr_list = list_new();
     session->far_list = list_new();
     session->qer_list = list_new();
+    if (!session->pdr_list || !session->far_list || !session->qer_list)
+        goto fail;
     // DumpUpfSession();
     //use to check srr flag
     session->srr_flag = false;
 
-    session->teid = rte_cpu_to_be_32(teid->teid);
+    session->teid = teid_key;
     session->pdn.paa.pdnType = pdnType;
-    if (pdnType == PFCP_PDN_TYPE_IPV4) {
-        session->ueIpv4.addr4.s_addr = rte_cpu_to_be_32(ueIp->addr4.s_addr);
-    } else {
-        UpfSessionRemove(session);
-        UTLT_Assert(0, return NULL, "UnSupported PDN Type(%d)", pdnType);
+    session->ueIpv4.addr4.s_addr = ue_key;
+    if (Self()->workerCount) {
+        session->worker = Self()->workers[Self()->nextWorker];
     }
 
-    UTLT_Assert(InsertTEIDtoSessionMap(session->teid, session) == STATUS_OK,
-                UpfSessionRemove(session); return NULL, "Unable to create Uplink data for TEID (%u)", session->teid);
-    UTLT_Assert(InsertUEIPtoSessionMap(session->ueIpv4.addr4.s_addr, session) == STATUS_OK,
-                UpfSessionRemove(session); return NULL, "Unable to create Downlink data for UE IP (%u)", ueIp->addr4.s_addr);
+    if (InsertTEIDtoSessionMap(teid_key, session) != STATUS_OK)
+        goto fail;
+    if (InsertUEIPtoSessionMap(ue_key, session) != STATUS_OK) {
+        TeidToUpfSessionMapFree(teid_key);
+        goto fail;
+    }
+
+    if (Self()->workerCount) {
+        Self()->nextWorker++;
+        UTLT_Info("Session SEID=%lu UE=%s -> UPF-U service=%u N3 port=%u N6 port=%u",
+                    session->upfSeid, inet_ntoa(ueIp->addr4), session->worker.service_id,
+                    session->worker.n3_port, session->worker.n6_port);
+    }
 
     /* Create per-session DL buffer ring (eager: before any packets arrive) */
     if (g_sess_buf && UpfSessBufRingCreate(session->index) < 0) {
@@ -381,6 +404,14 @@ UpfSession *UpfSessionAdd(PfcpUeIpAddr *ueIp,
 
     g_sessionIdPool++;
     return session;
+
+fail:
+    /* These lists are still empty. Remove only maps inserted by this attempt. */
+    if (session->pdr_list) list_destroy(session->pdr_list);
+    if (session->far_list) list_destroy(session->far_list);
+    if (session->qer_list) list_destroy(session->qer_list);
+    UpfSessionFree(session);
+    return NULL;
 }
 
 Status UpfSessionRemove(UpfSession *session) {
@@ -410,7 +441,6 @@ UpfSession *UpfSessionAddByMessage(PfcpMessage *message) {
 
     PFCPSessionEstablishmentRequest *request =
       &message->pFCPSessionEstablishmentRequest;
-    printf("PDN Type(%d)\n",((int8_t *)request->pDNType.value)[0]);
     if (!request->nodeID.presence) {
         UTLT_Error("no NodeID");
         return NULL;
@@ -451,14 +481,23 @@ UpfSession *UpfSessionAddByMessage(PfcpMessage *message) {
         return NULL;
     }
 
+    UTLT_Assert(request->pDNType.value && request->pDNType.len >= 1 &&
+                request->cPFSEID.value && request->cPFSEID.len >= 9 &&
+                request->createPDR[0].pDI.uEIPAddress.value &&
+                request->createPDR[0].pDI.uEIPAddress.len >= 5 &&
+                request->createPDR[0].pDI.localFTEID.value &&
+                request->createPDR[0].pDI.localFTEID.len >= 9,
+                return NULL, "Incomplete IPv4 session identifiers");
+
     session = UpfSessionAdd((PfcpUeIpAddr *)
                             request->createPDR[0].pDI.uEIPAddress.value,
                             (PfcpFTeid *) request->createPDR[0].pDI.localFTEID.value,
                             request->createPDR[0].pDI.networkInstance.value,
+                            request->createPDR[0].pDI.networkInstance.len,
                             ((int8_t *)request->pDNType.value)[0]);
     UTLT_Assert(session, return NULL, "session add error");
 
-    session->smfSeid = *(uint64_t*)request->cPFSEID.value;
+    session->smfSeid = rte_be_to_cpu_64(((PfcpFSeid *)request->cPFSEID.value)->seid);
     // DumpUpfSession();
     UTLT_Debug("UPF Establishment UPF SEID: %lu", session->upfSeid);
     UTLT_Debug("UPF Establishment SMF SEID: %lu", session->smfSeid);

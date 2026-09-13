@@ -36,3 +36,15 @@ UpfSendEvt1(uint16_t dest_sid, uint32_t type, uintptr_t a0) {
         return rc;
 }
 
+static inline int
+UpfSendEvt2(uint16_t dest_sid, uint32_t type, uintptr_t a0, uintptr_t a1) {
+        Event *e = (Event *)rte_calloc("upf_evt", 1, sizeof(*e), 0);
+        if (!e) return -1;
+        e->type = (uintptr_t)type;
+        e->argc = 2;
+        e->arg0 = a0;
+        e->arg1 = a1;
+        int rc = onvm_nflib_send_msg_to_nf(dest_sid, e);
+        if (rc < 0) rte_free(e);
+        return rc;
+}

@@ -58,6 +58,16 @@ struct ReportMsg {
     uint16_t pdrId;
 };
 
+#define UPF_MAX_WORKERS 32
+
+/* One UPF-U service owns one N3/N6 VF pair. Addresses use network byte order. */
+typedef struct {
+    uint16_t service_id;
+    uint16_t n3_port;
+    uint16_t n6_port;
+    struct in_addr n3_addr;
+} UpfWorker;
+
 typedef struct {
     uint8_t         role;                // UpfRole
     const char      *gtpDevNamePrefix;   // Default : "upfgtp"
@@ -117,6 +127,10 @@ typedef struct {
     int             accessPort;          // Default : 0
     int             corePort;            // Default : 1
     int             sgiPort;             // Default : 1  (SGi follows CORE)
+
+    UpfWorker       workers[UPF_MAX_WORKERS];
+    uint16_t        workerCount;         // 0 keeps the existing single-UPF-U mode
+    uint16_t        nextWorker;          // One session per worker; no reuse in this demo
 } UpfContext;
 
 typedef struct _UpfUeIp {
@@ -138,6 +152,10 @@ typedef struct _UpfSession {
     UpfUeIp         ueIpv4;
     UpfUeIp         ueIpv6;
     uint32_t        teid;
+
+    /* Copied into shared memory; no pointer into UPF-C's private context.
+     * service_id == 0 denotes the existing single-UPF-U mode. */
+    UpfWorker       worker;
 
     /* User location */
     Tai             tai;
@@ -211,6 +229,7 @@ void UeIpToUpfSessionMapFree(uint32_t ueip);
 
 // Find Session APIs
 UpfSession *UpfSessionFindBySeid(uint64_t seid);
+UpfSession *UpfGetSessionByIndex(int32_t idx);
 UpfSession *UpfSessionFindByTeid(uint32_t teid);
 UpfSession *UpfSessionFindByUeIP(uint32_t ueip);
 

@@ -148,8 +148,15 @@ static inline uint32_t upf_cls_publish(void *new_snap,
 }
 
 
-static void *g_cls_retired_snapshot = NULL;
-static uint32_t g_cls_retired_version = 0;
+typedef struct ClsRetired {
+    void *snapshot;
+    uint32_t version;
+    struct ClsRetired *next;
+} ClsRetired;
+
+/* UPF-C's event loop owns this list and the per-service ACK versions. */
+static ClsRetired *g_cls_retired;
+static uint32_t g_cls_acked[MAX_SERVICES];
 
 
 // bool UpfClsRebuildAndPublish(uint32_t *out_version) {
@@ -308,21 +315,31 @@ bool UpfClsRebuildAndPublish(uint32_t *out_version) {
     }
     if (it) list_iterator_destroy(it);
 
+    /* Reserve retirement bookkeeping before exposing the new snapshot. */
+    ClsRetired *entry = rte_malloc("cls_retired", sizeof(*entry), 0);
+    if (!entry) {
+        cls_destroy(snap);
+        return false;
+    }
+
     /* Publish with seqlock; version is even & monotonically increasing */
     void    *retired = NULL;
     uint32_t ver     = upf_cls_publish((void *)snap, &retired);
 
-    /* Cache the retired snapshot only if there was one */
+    /* Several publishes can precede the workers' ACKs. Retain every snapshot. */
     if (retired) {
-        __atomic_store_n(&g_cls_retired_snapshot, retired, __ATOMIC_RELEASE);
-        __atomic_store_n(&g_cls_retired_version,  ver,     __ATOMIC_RELEASE);
-        UTLT_Debug("CLS publish: new=%p retired=%p ver=%u", snap, retired, ver);
+        *entry = (ClsRetired){ .snapshot = retired, .version = ver, .next = g_cls_retired };
+        g_cls_retired = entry;
     } else {
-        UTLT_Debug("CLS publish: new=%p retired=<none> ver=%u", snap, ver);
+        rte_free(entry);
     }
 
-    /* Notify DP exactly once to flip to this version */
-    UpfSendEvt1(UPF_U_SERVICE_ID, EVT_CLS_GC_REQ, (uintptr_t)ver);
+    if (Self()->workerCount) {
+        for (uint16_t i = 0; i < Self()->workerCount; i++)
+            UpfSendEvt1(Self()->workers[i].service_id, EVT_CLS_GC_REQ, (uintptr_t)ver);
+    } else {
+        UpfSendEvt1(UPF_U_SERVICE_ID, EVT_CLS_GC_REQ, (uintptr_t)ver);
+    }
 
     if (out_version) *out_version = ver;
     return true;
@@ -341,21 +358,33 @@ bool UpfClsRebuildAndPublish(uint32_t *out_version) {
     }
 } */
 
-void UpfClsOnAckFree(uint32_t ver) {
-    // Acquire load so we compare against a coherent value
-    uint32_t rver = __atomic_load_n(&g_cls_retired_version, __ATOMIC_ACQUIRE);
-    if (ver != rver) return;
+void UpfClsOnAckFree(uint32_t ver, uint16_t service_id) {
+    bool known = !Self()->workerCount && service_id == UPF_U_SERVICE_ID;
+    for (uint16_t i = 0; i < Self()->workerCount; i++)
+        known |= service_id == Self()->workers[i].service_id;
+    uint32_t published = __atomic_load_n(&g_upf_cls_ctrl->version, __ATOMIC_ACQUIRE);
+    if (!known || service_id >= MAX_SERVICES || !ver || (ver & 1u) || ver > published)
+        return;
+    if (ver > g_cls_acked[service_id]) g_cls_acked[service_id] = ver;
 
-    // Atomic exchange to NULL to make it double-free proof
-    void *to_free = __atomic_exchange_n(&g_cls_retired_snapshot, NULL, __ATOMIC_ACQ_REL);
-    if (to_free) {
-        UTLT_Debug("CLS GC: ACK ver=%u, freeing retired snapshot %p", ver, to_free);
-        cls_destroy((cls_handle_t*)to_free);
+    uint32_t safe_ver = g_cls_acked[UPF_U_SERVICE_ID];
+    if (Self()->workerCount) {
+        safe_ver = UINT32_MAX;
+        for (uint16_t i = 0; i < Self()->workerCount; i++)
+            safe_ver = RTE_MIN(safe_ver, g_cls_acked[Self()->workers[i].service_id]);
     }
-
-    // Optional: clear version (release) so duplicate ACKs are cheap no-ops
-    __atomic_store_n(&g_cls_retired_version, 0, __ATOMIC_RELEASE);
-    PdrFreeUpTo(ver);
+    ClsRetired **link = &g_cls_retired;
+    while (*link) {
+        ClsRetired *entry = *link;
+        if (entry->version <= safe_ver) {
+            *link = entry->next;
+            cls_destroy((cls_handle_t *)entry->snapshot);
+            rte_free(entry);
+        } else {
+            link = &entry->next;
+        }
+    }
+    PdrFreeUpTo(safe_ver);
 }
 
 
@@ -374,8 +403,12 @@ void UpfClsOnAckFree(uint32_t ver) {
 /* Pre-compile the flowDescription string into meter_key / fd_target / has_fd
  * so UPF-U never has to do strstr/sscanf in the per-packet path. */
 static void
-UpfPdrPrecompileSdf(UpfPDR *pdr, int access_port, int core_port, int sgi_port)
+UpfPdrPrecompileSdf(UpfPDR *pdr, const UpfSession *session)
 {
+    const UpfWorker *worker = &session->worker;
+    int access_port = worker->service_id ? worker->n3_port : Self()->accessPort;
+    int core_port = worker->service_id ? worker->n6_port : Self()->corePort;
+    int sgi_port = worker->service_id ? worker->n6_port : Self()->sgiPort;
     pdr->has_fd   = 0;
     pdr->fd_target = 0;
     pdr->meter_key = 0;
@@ -720,7 +753,7 @@ Status UpfN4HandleCreatePdr(UpfSession *session, CreatePDR *createPdr) {
     }
 
     /* Pre-compile SDF flowDescription into meter_key/fd_target/has_fd */
-    UpfPdrPrecompileSdf(upfPdr, Self()->accessPort, Self()->corePort, Self()->sgiPort);
+    UpfPdrPrecompileSdf(upfPdr, session);
 
     /* Pre-compute session index for O(1) buffer lookup in UPF-U */
     upfPdr->session_index = session->index;
@@ -1241,7 +1274,7 @@ Status UpfN4HandleUpdatePdr(UpfSession *session, UpdatePDR *updatePdr) {
     }
 
     /* Re-compile SDF flowDescription (PDI may have been updated) */
-    UpfPdrPrecompileSdf(upfPdr, Self()->accessPort, Self()->corePort, Self()->sgiPort);
+    UpfPdrPrecompileSdf(upfPdr, session);
 
     /* Pre-compute session index for O(1) buffer lookup in UPF-U */
     upfPdr->session_index = session->index;
@@ -1366,9 +1399,6 @@ Status UpfN4HandleUpdateFar(UpfSession *session, UpdateFAR *updateFar) {
 
     //to check the last action
     oldAction = upfFar->applyAction;
-    if (oldAction & PFCP_FAR_APPLY_ACTION_BUFF) {
-         onvm_nflib_send_msg_to_nf(1, NULL);
-    }
 
     UTLT_Assert(_ConvertUpdateFARTlvToRule(upfFar, updateFar) == STATUS_OK,
         return STATUS_ERROR, "Convert FAR TLV To Rule is failed");
@@ -1377,7 +1407,8 @@ Status UpfN4HandleUpdateFar(UpfSession *session, UpdateFAR *updateFar) {
      * UPF-U sees the new FORW action when it processes drained packets. */
     if ((oldAction & PFCP_FAR_APPLY_ACTION_BUFF) &&
         (upfFar->applyAction & PFCP_FAR_APPLY_ACTION_FORW)) {
-         UpfSendEvt1(UPF_U_SERVICE_ID, UPF_EVENT_CLEAR_AND_DRAIN,
+         uint16_t owner = session->worker.service_id ? session->worker.service_id : UPF_U_SERVICE_ID;
+         UpfSendEvt1(owner, UPF_EVENT_CLEAR_AND_DRAIN,
                      (uintptr_t)session->index);
     }
 

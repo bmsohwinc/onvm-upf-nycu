@@ -37,9 +37,6 @@
 #define ETHER_IP_UDP_HDR_LEN \
   (RTE_ETHER_HDR_LEN + 20 + sizeof(struct rte_udp_hdr))
 
-// UpfClsOnAckFree is defined in n4_onvm_pfcp_handler.c
-extern void UpfClsOnAckFree(uint32_t ver);
-
 void
 msg_handler(void *msg_data, struct onvm_nf_local_ctx *nf_local_ctx) {
     //struct ReportMsg *msg = (struct ReportMsg *) msg_data;
@@ -53,8 +50,9 @@ msg_handler(void *msg_data, struct onvm_nf_local_ctx *nf_local_ctx) {
 
         case EVT_CLS_GC_ACK: {
             uint32_t ver = (uint32_t)msg->arg0;
-            UpfClsOnAckFree(ver);    /* frees retired snapshot if version matches */
-            //rte_free(msg);           /* receiver frees Event on success */
+            uint16_t service_id = msg->argc >= 2 ? (uint16_t)msg->arg1 : UPF_U_SERVICE_ID;
+            UpfClsOnAckFree(ver, service_id);
+            rte_free(msg);
             return;
         }
         default:

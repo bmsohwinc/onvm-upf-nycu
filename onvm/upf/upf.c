@@ -368,6 +368,7 @@ UpfSession *UpfSessionAlloc(const uint64_t seid) {
     }
     UpfSession *session;
     session = UpfGetSessionByIndex(status);
+    memset(session, 0, sizeof(*session));
     session->index = status;
     session->hashKey = cal_hash;
     session->upfSeid = seid;
@@ -381,14 +382,16 @@ UpfSession *UpfSessionFindByUeIP(uint32_t ue_ip) {
     // UTLT_Debug("UpfSessionFindByUeIP");
     // DumpUpfSession();
     uint32_t cal_hash = UEIP_TO_HASH_KEY(ue_ip);
-    int32_t status = rte_hash_lookup_with_hash(ueip_upf_session_map->hash,
+    /* Map data stores the session-table index; this hash's slot is unrelated. */
+    void *data = NULL;
+    int32_t status = rte_hash_lookup_with_hash_data(ueip_upf_session_map->hash,
                                                (const void *)&ue_ip,
-                                               cal_hash);
+                                               cal_hash, &data);
     if (status < 0) {
         UTLT_Info("Not Found UpfSessionFindByUeIP[%u]", ue_ip);
         return NULL;
     }
-    return UpfGetSessionByIndex(status);
+    return UpfGetSessionByIndex(*(int *)data);
 }
 
 Status InsertUEIPtoSessionMap(const uint32_t ue_ip, UpfSession *session) {
@@ -409,14 +412,15 @@ Status InsertUEIPtoSessionMap(const uint32_t ue_ip, UpfSession *session) {
 
 UpfSession *UpfSessionFindByTeid(uint32_t teid) {
     uint32_t cal_hash = TEID_TO_HASH_KEY(teid);
-    int32_t status = rte_hash_lookup_with_hash(teid_upf_session_map->hash,
+    void *data = NULL;
+    int32_t status = rte_hash_lookup_with_hash_data(teid_upf_session_map->hash,
                                                (const void *)&teid,
-                                               cal_hash);
+                                               cal_hash, &data);
     if (status < 0) {
         UTLT_Info("Not Found InsertTEIDtoSessionMap[%u]", teid);
         return NULL;
     }
-    return UpfGetSessionByIndex(status);
+    return UpfGetSessionByIndex(*(int *)data);
 }
 
 Status InsertTEIDtoSessionMap(const uint32_t teid, UpfSession *session) {
@@ -435,7 +439,7 @@ Status InsertTEIDtoSessionMap(const uint32_t teid, UpfSession *session) {
 }
 
 void UeIpToUpfSessionMapFree(const uint32_t ueip) {
-    uint32_t cal_hash = TEID_TO_HASH_KEY(ueip);
+    uint32_t cal_hash = UEIP_TO_HASH_KEY(ueip);
     int32_t status = rte_hash_del_key_with_hash(ueip_upf_session_map->hash,
                                                 (const void *)&ueip,
                                                 cal_hash);

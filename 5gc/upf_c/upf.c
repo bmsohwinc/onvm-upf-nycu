@@ -99,7 +99,7 @@ int main(int argc, char *argv[]) {
     }
 
     status = UpfInit();
-    UTLT_Assert(status == STATUS_OK, returnStatus = STATUS_ERROR,
+    UTLT_Assert(status == STATUS_OK, return STATUS_ERROR,
                 "UPF failed to initialize");
 
     onvm_nflib_run(nf_local_ctx);

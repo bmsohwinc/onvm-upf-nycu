@@ -72,16 +72,23 @@ uint16_t pdrId = 0;
 typedef struct {
     void    *ptr;          // current active snapshot (cls_handle_t*)
     uint32_t ver;          // last applied version
+    uint32_t acked_ver;    // last ACK successfully enqueued to UPF-C
     uint32_t pending_ver;  // version announced by UPF-C via REQ
     uint8_t  flip_pending; // 1 when a flip is requested; cleared after flip
 } upf_cls_local_t;
 
 static upf_cls_local_t g_cls_local = {0};
+static uint16_t g_upfu_service_id = UPF_U_SERVICE_ID;
 
 // Flip to the latest published snapshot (called at burst boundary)
 static inline void
 UpfClsMaybeFlipAndAck(void) {
-    if (likely(!g_cls_local.flip_pending))
+    if (!g_upf_cls_ctrl)
+        return;
+    /* Also observe publication while idle or if a notification was lost. */
+    if (likely(!g_cls_local.flip_pending &&
+               __atomic_load_n(&g_upf_cls_ctrl->version, __ATOMIC_ACQUIRE) == g_cls_local.ver &&
+               g_cls_local.acked_ver == g_cls_local.ver))
         return;
 
     // Seqlock read: accept only a stable, even version that doesn't change
@@ -117,7 +124,9 @@ UpfClsMaybeFlipAndAck(void) {
     g_cls_local.ver  = v2;
     g_cls_local.flip_pending = 0;
 
-    (void)UpfSendEvt1(UPF_C_SERVICE_ID, EVT_CLS_GC_ACK, (uintptr_t)v2);
+    if (UpfSendEvt2(UPF_C_SERVICE_ID, EVT_CLS_GC_ACK, (uintptr_t)v2,
+                    (uintptr_t)g_upfu_service_id) >= 0)
+        g_cls_local.acked_ver = v2;
 }
 
 /* static inline const UPDK_PDR *
@@ -230,7 +239,6 @@ GetPdrByUeIpAddress(struct rte_mbuf *pkt, uint32_t ue_ip)
         return NULL;
     }
 
-    ConfigureQerFlows(pdr, false);
     return pdr;
 }
 
@@ -271,8 +279,6 @@ GetPdrByTeid(struct rte_mbuf *pkt, const gtp_parse_result_t *gtp_info) {
         UTLT_Error("Couldn't classify the packet to a PDR");
         return NULL;
     }
-
-    ConfigureQerFlows(pdr, true);
 
     return pdr;
 }
@@ -505,11 +511,21 @@ HandlePacketWithFar(struct rte_mbuf *pkt, UPDK_FAR *far, UPDK_QER *qer,
     return buff;
 }
 
-/* Per-session drain helper
- * Dequeue up to max_pkts from session ring, set meta OUT, and TX.
- * Returns the number of packets actually transmitted. */
+static bool
+UpfSessionIsLocal(const UpfSession *session, const struct onvm_nf *nf) {
+    const UpfWorker *worker = &session->worker;
+    if (!worker->service_id) return true;  /* Existing single-UPF-U mode */
+    return g_direct_io && worker->service_id == nf->service_id &&
+           worker->n3_port == g_n3_port && worker->n6_port == g_n6_port &&
+           worker->n3_addr.s_addr == g_n3_ip_be;
+}
+
+/* Dequeue this worker's session ring, restore OUT, and transmit up to max_pkts. */
 static uint32_t
 drain_session_batch(int sess_idx, uint32_t max_pkts, struct onvm_nf *nf) {
+    if (sess_idx < 0 || sess_idx >= SESS_BUF_MAX_USERS ||
+        !UpfSessionIsLocal(UpfGetSessionByIndex(sess_idx), nf))
+        return 0;
     UpfSessBuf *sb = &g_sess_buf[sess_idx];
     if (!sb->ring_created || !sb->ring)
         return 0;
@@ -644,6 +660,13 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
     }
     UTLT_Info("Got PDR ID is %u\n", pdr->pdrId);
 
+    if (pdr->session_index < 0 || pdr->session_index >= SESS_BUF_MAX_USERS)
+        return 0;
+    owner_session = UpfGetSessionByIndex(pdr->session_index);
+    if (!UpfSessionIsLocal(owner_session, nf_local_ctx->nf))
+        return 0;
+    ConfigureQerFlows(pdr, !is_dl);
+
     if (is_dl) {
         ue_key = rte_cpu_to_be_32(iph->dst_addr);
         if (!cal_pktlen_valid) {
@@ -652,7 +675,6 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
             meta->action = ONVM_NF_ACTION_DROP;
             return 0;
         }
-        owner_session = UpfSessionFindByUeIP(ue_key);
         ue_idx = findIndexByUeIpAddress(ue_key);
         if (ue_idx < 0) {
             ue_idx = GetQerByUEIpAddressFromPdr(ue_key, owner_session, pdr,
@@ -972,7 +994,8 @@ msg_handler(void *msg_data, struct onvm_nf_local_ctx *nf_local_ctx) {
     if (e && (uint32_t)e->type == UPF_EVENT_CLEAR_AND_DRAIN) {
         struct onvm_nf *nf = nf_local_ctx->nf;
         int sess_idx = (int)(uintptr_t)e->arg0;
-        if (sess_idx >= 0 && sess_idx < SESS_BUF_MAX_USERS) {
+        if (sess_idx >= 0 && sess_idx < SESS_BUF_MAX_USERS &&
+            UpfSessionIsLocal(UpfGetSessionByIndex(sess_idx), nf)) {
             g_sess_buf[sess_idx].is_buffering = 0;
             uint32_t n = drain_session_batch(sess_idx, UINT32_MAX, nf);
             UTLT_Debug("EVENT drain: sess %d, sent %u pkts\n", sess_idx, n);
@@ -1038,6 +1061,7 @@ main(int argc, char *argv[]) {
     }
 
     /* Initialize dynamic field offset */
+    g_upfu_service_id = nf_local_ctx->nf->service_id;
     struct onvm_configuration *onvm_config = onvm_nflib_get_onvm_config();
     nf_local_ctx->nf->dynfield_offset = onvm_config->dynfield_offset;
 

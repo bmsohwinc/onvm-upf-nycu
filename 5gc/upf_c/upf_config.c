@@ -19,7 +19,12 @@
 #include "upf_config.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <rte_memzone.h>
 
+#include "onvm_common.h"
+#include "upf_events.h"
 #include "upf_context.h"
 #include "utlt_yaml.h"
 #include "updk/env.h"
@@ -33,6 +38,84 @@ static Status AddPfcpEndpoint(const char *host); // host: hostname or ip address
 static Status AddGtpv1EndpointWithName(const char *host, const char *ifname);
 
 static yaml_document_t *document = NULL;
+
+static Status ParseWorkerPortOrService(const char *value, unsigned long max, uint16_t *out) {
+    char *end;
+    UTLT_Assert(value && value[0] >= '0' && value[0] <= '9',
+                return STATUS_ERROR, "Worker port/service must be a decimal integer");
+    errno = 0;
+    unsigned long n = strtoul(value, &end, 10);
+    UTLT_Assert(!errno && !*end && n <= max, return STATUS_ERROR,
+                "Invalid worker port/service: %s", value);
+    *out = (uint16_t)n;
+    return STATUS_OK;
+}
+
+static Status ParseWorkers(YamlIter *config) {
+    YamlIter workers;
+    YamlIterChild(config, &workers);
+    UTLT_Assert(YamlIterType(&workers) == YAML_SEQUENCE_NODE && !Self()->workerCount,
+                return STATUS_ERROR, "upf_u_workers must be one nonempty list");
+    const struct rte_memzone *mz = rte_memzone_lookup(MZ_DIRECT_PORT_MASK);
+    UTLT_Assert(mz && mz->len >= sizeof(uint64_t), return STATUS_ERROR,
+                "Worker VFs require a manager with direct ports reserved by -D");
+    uint64_t direct_mask = *(const uint64_t *)mz->addr;
+
+    while (YamlIterNext(&workers)) {
+        UTLT_Assert(Self()->workerCount < UPF_MAX_WORKERS, return STATUS_ERROR,
+                    "Too many UPF-U workers");
+        UpfWorker worker = {0};
+        unsigned fields = 0;
+        YamlIter entry;
+        YamlIterChild(&workers, &entry);
+        UTLT_Assert(YamlIterType(&entry) == YAML_MAPPING_NODE, return STATUS_ERROR,
+                    "Each UPF-U worker must be a mapping");
+        while (YamlIterNext(&entry)) {
+            const char *key = YamlIterGet(&entry, GET_KEY);
+            const char *value = YamlIterGet(&entry, GET_VALUE);
+            unsigned field;
+            UTLT_Assert(key && value, return STATUS_ERROR, "Invalid UPF-U worker field");
+            if (!strcmp(key, "service_id")) {
+                field = 1;
+                UTLT_Assert(ParseWorkerPortOrService(value, MAX_SERVICES - 1,
+                            &worker.service_id) == STATUS_OK, return STATUS_ERROR, "Invalid service_id");
+            } else if (!strcmp(key, "n3_port") || !strcmp(key, "n6_port")) {
+                field = !strcmp(key, "n3_port") ? 2 : 4;
+                UTLT_Assert(ParseWorkerPortOrService(value, RTE_MIN(RTE_MAX_ETHPORTS, 64) - 1,
+                            field == 2 ? &worker.n3_port : &worker.n6_port) == STATUS_OK,
+                            return STATUS_ERROR, "Invalid VF port");
+            } else if (!strcmp(key, "n3_ip")) {
+                field = 8;
+                UTLT_Assert(inet_pton(AF_INET, value, &worker.n3_addr) == 1 && worker.n3_addr.s_addr,
+                            return STATUS_ERROR, "Invalid worker N3 IPv4 address: %s", value);
+            } else {
+                UTLT_Error("Unknown UPF-U worker field: %s", key);
+                return STATUS_ERROR;
+            }
+            UTLT_Assert(!(fields & field), return STATUS_ERROR, "Duplicate worker field: %s", key);
+            fields |= field;
+        }
+        UTLT_Assert(fields == 15 && worker.service_id && worker.service_id != UPF_C_SERVICE_ID,
+                    return STATUS_ERROR, "Worker requires service_id, n3_port, n6_port and n3_ip; service 2 is UPF-C");
+        UTLT_Assert(worker.n3_port != worker.n6_port &&
+                    (direct_mask & (UINT64_C(1) << worker.n3_port)) &&
+                    (direct_mask & (UINT64_C(1) << worker.n6_port)), return STATUS_ERROR,
+                    "Worker requires two distinct, manager-reserved VF ports");
+        for (uint16_t i = 0; i < Self()->workerCount; i++) {
+            const UpfWorker *other = &Self()->workers[i];
+            UTLT_Assert(worker.service_id != other->service_id &&
+                        worker.n3_addr.s_addr != other->n3_addr.s_addr &&
+                        worker.n3_port != other->n3_port && worker.n3_port != other->n6_port &&
+                        worker.n6_port != other->n3_port && worker.n6_port != other->n6_port,
+                        return STATUS_ERROR, "Workers must have distinct services, N3 IPs and VF pairs");
+        }
+        Self()->workers[Self()->workerCount++] = worker;
+        UTLT_Info("UPF-U worker service=%u N3=%s port=%u N6 port=%u",
+                    worker.service_id, inet_ntoa(worker.n3_addr), worker.n3_port, worker.n6_port);
+    }
+    UTLT_Assert(Self()->workerCount, return STATUS_ERROR, "upf_u_workers must not be empty");
+    return STATUS_OK;
+}
 
 Status UpfLoadConfigFile(const char *configFilePath) {
     Status status = STATUS_OK;
@@ -168,6 +251,9 @@ Status UpfConfigParse() {
 
                     } while (YamlIterType(&pfcpList) == YAML_SEQUENCE_NODE);
                     
+                } else if (!strcmp(upfKey, "upf_u_workers")) {
+                    UTLT_Assert(ParseWorkers(&upfIter) == STATUS_OK, return STATUS_ERROR,
+                                "Invalid upf_u_workers configuration");
                 } else if (!strcmp(upfKey, "dataplane_ports")) {
                     YamlIter portIter;
                     YamlIterChild(&upfIter, &portIter);

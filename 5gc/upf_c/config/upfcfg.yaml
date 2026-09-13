@@ -25,6 +25,13 @@ configuration:
     core: 1
     sgi: 1
 
+  # Optional direct-I/O worker ownership (one UE per worker, in list order).
+  # Match each worker's ONVM service ID and UPF-U YAML; manager must reserve all VFs.
+  # Distinct N3 endpoint negotiation with SMF is still a separate implementation step.
+  # upf_u_workers:
+  #   - {service_id: 14, n3_ip: 192.0.2.11, n3_port: 0, n6_port: 1}
+  #   - {service_id: 15, n3_ip: 192.0.2.12, n3_port: 2, n6_port: 3}
+
   dnn_list:
     - dnn: internet
       cidr: 10.60.0.0/24

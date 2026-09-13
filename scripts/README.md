@@ -62,8 +62,42 @@ partial TX bursts free unsent packets. NF control messages still use ONVM
 message queues. Each VF must have only one worker using its queues, and its
 PMD must support RX/TX in a DPDK secondary process.
 
-Worker selection and PFCP endpoint negotiation are separate control-path
-changes. The example service IDs alone do not enable two-session distribution.
+## UPF-C worker ownership
+
+Add this optional list under `configuration` in the UPF-C YAML, using the actual
+VF port IDs and worker N3 addresses:
+
+```yaml
+upf_u_workers:
+  - {service_id: 14, n3_ip: 192.0.2.11, n3_port: 0, n6_port: 1}
+  - {service_id: 15, n3_ip: 192.0.2.12, n3_port: 2, n6_port: 3}
+```
+
+Run UPF-C as service 2, and exactly one UPF-U per listed service. Each worker's
+`direct_io`, N3 IP and port pair must match its UPF-U YAML. All listed VF ports
+must be reserved by the manager. Start both workers before connecting the UEs.
+
+The first new session takes the first worker; the second takes the second.
+UPF-C copies ownership into the shared session and uses that worker's ports
+when preparing PDRs. Buffer-drain events go only to the owner; classifier
+updates reach every configured worker. Old classifier snapshots and retired
+PDRs remain allocated until every worker has acknowledged a newer snapshot.
+UPF-U rejects packets and drain events belonging to another worker.
+
+PFCP retransmissions replay the cached response before session allocation.
+Duplicate UE IPs/TEIDs cannot replace existing mappings, and a new session
+cannot consume a worker beyond the configured list. Assignments are not reused;
+restart all NFs between demo runs. Omitting the list preserves the existing
+single-UPF-U configuration and service 1 notifications.
+
+The complete two-UE demo still requires UPF-side TEID allocation, Created PDR
+responses, and the matching SMF endpoint/QER changes. PFCP currently uses
+SMF-supplied TEIDs; the configured `n3_ip` records/checks worker ownership.
+Returning that worker's N3 endpoint to SMF remains the next protocol step.
+
+Rebuild the manager, UPF-C and both UPF-Us together, then restart them: the
+shared `UpfSession` layout changed. Generic ONVM NF structures and other NFs'
+ring paths are unchanged.
 
 ## Licensing
 
