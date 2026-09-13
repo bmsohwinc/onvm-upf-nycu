@@ -106,6 +106,7 @@ extern struct rte_ring *incoming_msg_queue;
 
 /* the shared port information: port numbers, rx and tx stats etc. */
 extern struct port_info *ports;
+extern uint64_t onvm_direct_port_mask;
 extern struct core_status *cores;
 
 extern struct rte_mempool *pktmbuf_pool;

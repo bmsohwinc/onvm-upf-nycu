@@ -3,6 +3,30 @@
 This directory contains various scripts to run and configure different
 portions of openNetVM
 
+## Ports reserved for direct NF I/O
+
+`start.sh -D DIRECT_PORTMASK` reserves ports for direct NF RX/TX. The manager
+initializes one RX queue and one TX queue (both queue 0) on each reserved port,
+but does not receive or transmit packets on it. Other ports keep the existing
+manager/ring path. The default mask is `0`.
+
+The direct mask must be a subset of `-k PORTMASK`. For four VF devices assigned
+DPDK port IDs 0–3:
+
+```bash
+ONVM_ALLOW_LIST="<N3_VF1_PCI> <N6_VF1_PCI> <N3_VF2_PCI> <N6_VF2_PCI>" \
+    ./scripts/start.sh -k f -D f -n 0xFFF8 -s stdout
+```
+
+Check the manager startup log for the actual device-to-port-ID mapping. Each
+reserved port must have exactly one direct-I/O NF polling/transmitting queue 0;
+a ring-based NF cannot use these ports through the manager.
+
+`ONVM_DIRECT_PORT_MASK=f` also supplies the mask, allowing an existing wrapper
+script to enable it without adding a `-D` argument. An explicit `-D` overrides
+the environment variable. The manager publishes the immutable `uint64_t` mask
+in `MProc_direct_port_mask` for direct-I/O NFs to check at startup.
+
 ## Licensing
 
 ```

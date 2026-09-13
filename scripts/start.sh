@@ -1,7 +1,8 @@
 #!/bin/bash
 
 function usage {
-        echo "$0 -k PORTMASK -n NF-COREMASK [-m MANAGER CORES] [-r NUM-SERVICES] [-d DEFAULT-SERVICE] [-s STATS-OUTPUT] [-p WEB-PORT-NUMBER] [-z STATS-SLEEP-TIME]"
+        echo "$0 -k PORTMASK -n NF-COREMASK [-D DIRECT-PORTMASK] [-m MANAGER CORES] [-r NUM-SERVICES] [-d DEFAULT-SERVICE] [-s STATS-OUTPUT] [-p WEB-PORT-NUMBER] [-z STATS-SLEEP-TIME]"
+        echo "  -D reserves a hexadecimal subset of -k for direct NF I/O (default: ONVM_DIRECT_PORT_MASK or 0)"
         # this works well on our 2x6-core nodes
         echo "$0 -k 3 -n 0xF0 --> cores 0,1,2, with ports 0 and 1, with NFs running on cores 4,5,6,7"
         echo -e "\tBy default, cores will be used as follows in numerical order:"
@@ -36,9 +37,9 @@ function usage {
 # User can still use legacy syntax for backwards compatibility. Check syntax of input
 # Check validity of core input
 core_check="^([0-8]+,){2}([0-8]+)(,[0-8]+)*$"
-port_check="^[0-9]+$"
+port_check="^(0[xX])?[0-9a-fA-F]+$"
 nf_check="^0x[0-9A-F]+$"
-flag_check="^-[a-z]$"
+flag_check="^-[a-zA-Z]$"
 # Check for argument matches
 [[ $1 =~ $core_check ]]
 if [[ -n ${BASH_REMATCH[0]} ]]
@@ -102,6 +103,7 @@ fi
 SCRIPT=$(readlink -f "$0")
 SCRIPTPATH=$(dirname "$SCRIPT")
 verbosity=1
+direct_ports="${ONVM_DIRECT_PORT_MASK:-0}"
 # Initialize base virtual address to empty.
 virt_addr=""
 
@@ -112,9 +114,10 @@ then
     exit 1
 fi
 
-while getopts "a:r:d:s:t:l:p:z:cvm:k:n:j" opt; do
+while getopts "a:r:d:s:t:l:p:z:cvm:k:n:jD:" opt; do
     case $opt in
         a) virt_addr="--base-virtaddr=$OPTARG";;
+        D) direct_ports="$OPTARG";;
         r) num_srvc="-r $OPTARG";;
         d) def_srvc="-d $OPTARG";;
         s) stats="-s $OPTARG";;
@@ -183,6 +186,13 @@ then
     usage
 fi
 
+# Validate the direct mask here; manager checks that it is a subset of enabled ports.
+if [[ ! $direct_ports =~ $port_check ]]
+then
+    echo "Error: Invalid direct port mask. Use a hexadecimal number."
+    exit 1
+fi
+
 # Check for nf_cores flag
 if [ -z "$nf_cores" ]
 then
@@ -218,7 +228,8 @@ fi
 
 # Convert the port mask to binary
 # Using bc where obase=2 indicates the output is base 2 and ibase=16 indicates the input is base 16
-ports_bin=$(echo "obase=2; ibase=16; $ports" | bc)
+ports_hex=$(printf '%s\n' "${ports#0[xX]}" | tr '[:lower:]' '[:upper:]')
+ports_bin=$(echo "obase=2; ibase=16; $ports_hex" | bc)
 # Splice out the 0's from the binary numbers. The result is only 1's. Example: 1011001 -> 1111
 ports_bin="${ports_bin//0/}"
 # The number of ports is the length of the string of 1's. Using above example: 1111 -> 4
@@ -285,7 +296,7 @@ sudo ./build/onvm/onvm_mgr/onvm_mgr \
     -l "$cpu" -n 4 --proc-type=primary \
     "${allow_args[@]}" \
     ${virt_addr} \
-    -- -p ${ports} -n ${nf_cores} ${num_srvc} ${def_srvc} ${stats} ${stats_sleep_time} ${verbosity_level} ${ttl} ${packet_limit} ${shared_cpu_flag} ${jumbo_frames_flag}
+    -- -p ${ports} --direct-port-mask "${direct_ports}" -n ${nf_cores} ${num_srvc} ${def_srvc} ${stats} ${stats_sleep_time} ${verbosity_level} ${ttl} ${packet_limit} ${shared_cpu_flag} ${jumbo_frames_flag}
 
 if [ "${stats}" = "-s web" ]
 then

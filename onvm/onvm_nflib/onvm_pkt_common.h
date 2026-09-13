@@ -62,6 +62,14 @@ extern struct onvm_service_chain *default_chain;
 
 /*********************************Interfaces**********************************/
 
+/* Manager sets this process-local mask once, before launching its threads.
+ * Other NF processes default to zero; this does not enable direct NF I/O. */
+void
+onvm_pkt_set_direct_port_mask(uint64_t port_mask);
+
+int
+onvm_pkt_is_direct_port(uint16_t port);
+
 /*
  * Interface to process packets in a given TX queue.
  *

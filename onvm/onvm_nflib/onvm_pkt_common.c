@@ -48,6 +48,8 @@
 
 #include "onvm_pkt_common.h"
 
+static uint64_t direct_port_mask;
+
 /**********************Internal Functions Prototypes**************************/
 
 /*
@@ -84,6 +86,16 @@ static int
 onvm_pkt_drop(struct rte_mbuf *pkt);
 
 /**********************************Interfaces*********************************/
+
+void
+onvm_pkt_set_direct_port_mask(uint64_t port_mask) {
+        direct_port_mask = port_mask;
+}
+
+int
+onvm_pkt_is_direct_port(uint16_t port) {
+        return port < 64 && (direct_port_mask & (UINT64_C(1) << port)) != 0;
+}
 
 void
 onvm_pkt_process_tx_batch(struct queue_mgr *tx_mgr, struct rte_mbuf *pkts[], int pkt_meta_offset, uint16_t tx_count, struct onvm_nf *nf) {
@@ -223,7 +235,9 @@ onvm_pkt_flush_port_queue(struct queue_mgr *tx_mgr, uint16_t port) {
                 return;
 
         tx_stats = &(ports->tx_stats);
-        sent = rte_eth_tx_burst(port, tx_mgr->id, port_buf->buffer, port_buf->count);
+        /* A stale/misdirected manager buffer must never touch a reserved VF. */
+        sent = onvm_pkt_is_direct_port(port) ? 0 :
+            rte_eth_tx_burst(port, tx_mgr->id, port_buf->buffer, port_buf->count);
         if (unlikely(sent < port_buf->count)) {
                 for (i = sent; i < port_buf->count; i++) {
                         onvm_pkt_drop(port_buf->buffer[i]);
@@ -260,8 +274,18 @@ inline static void
 onvm_pkt_enqueue_port(struct queue_mgr *tx_mgr, uint16_t port, struct rte_mbuf *buf) {
         struct packet_buf *port_buf;
 
-        if (tx_mgr == NULL || buf == NULL || !ports->init[port])
+        if (tx_mgr == NULL || buf == NULL)
                 return;
+
+        if (port >= RTE_MAX_ETHPORTS) {
+                onvm_pkt_drop(buf);
+                return;
+        }
+        if (onvm_pkt_is_direct_port(port) || !ports->init[port]) {
+                onvm_pkt_drop(buf);
+                ports->tx_stats.tx_drop[port]++;
+                return;
+        }
 
         port_buf = &tx_mgr->tx_thread_info->port_tx_bufs[port];
         port_buf->buffer[port_buf->count++] = buf;
