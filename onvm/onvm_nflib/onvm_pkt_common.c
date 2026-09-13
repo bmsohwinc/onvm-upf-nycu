@@ -47,6 +47,7 @@
 ******************************************************************************/
 
 #include "onvm_pkt_common.h"
+#include "onvm_direct_io.h"
 
 static uint64_t direct_port_mask;
 
@@ -105,6 +106,11 @@ onvm_pkt_process_tx_batch(struct queue_mgr *tx_mgr, struct rte_mbuf *pkts[], int
 
         if (tx_mgr == NULL || pkts == NULL || nf == NULL)
                 return;
+
+        if (tx_mgr->mgr_type_t == NF && onvm_direct_io_matches(nf)) {
+                (void)onvm_direct_io_tx(nf, pkts, tx_count);
+                return;
+        }
 
         for (i = 0; i < tx_count; i++) {
                 meta = onvm_get_pkt_meta(pkts[i], pkt_meta_offset);
@@ -255,6 +261,12 @@ onvm_pkt_enqueue_tx_thread(struct packet_buf *pkt_buf, struct onvm_nf *nf) {
 
         if (pkt_buf->count == 0)
                 return;
+
+        if (onvm_direct_io_matches(nf)) {
+                (void)onvm_direct_io_tx(nf, pkt_buf->buffer, pkt_buf->count);
+                pkt_buf->count = 0;
+                return;
+        }
 
         if (unlikely(pkt_buf->count > 0 &&
                      rte_ring_enqueue_bulk(nf->tx_q, (void **)pkt_buf->buffer, pkt_buf->count, NULL) == 0)) {

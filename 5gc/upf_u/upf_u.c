@@ -995,6 +995,8 @@ callback_handler(struct onvm_nf_local_ctx *nf_local_ctx) {
         return 0;
 
     nf = nf_local_ctx->nf;
+    /* Apply classifier updates even when neither VF receives data. */
+    UpfClsMaybeFlipAndAck();
     if (unlikely(!last_p)) last_p = rte_get_tsc_cycles();
     cur_p = rte_get_tsc_cycles();
 
@@ -1052,6 +1054,14 @@ main(int argc, char *argv[]) {
 
     UTLT_SetLogLevel(g_log_level);
     printf("[UPF-U] Log level: %s\n", g_log_level);
+
+    if (g_direct_io) {
+        int ret = onvm_nflib_enable_direct_io(nf_local_ctx->nf, g_n3_port, g_n6_port);
+        if (ret < 0) {
+            onvm_nflib_stop(nf_local_ctx);
+            rte_exit(EXIT_FAILURE, "Cannot enable UPF-U direct I/O: %s\n", strerror(-ret));
+        }
+    }
 
     if (UpfClsCtrlInit() < 0) {
         rte_exit(EXIT_FAILURE, "CLS_CTRL memzone init failed\n");

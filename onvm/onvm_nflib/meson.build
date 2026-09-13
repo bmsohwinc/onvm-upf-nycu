@@ -1,5 +1,6 @@
 sources = files(
     'onvm_config_common.c',
+    'onvm_direct_io.c',
     'onvm_flow_dir.c',
     'onvm_flow_table.c',
     'onvm_nflib.c',

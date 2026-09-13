@@ -127,6 +127,16 @@ int
 onvm_nflib_run(struct onvm_nf_local_ctx *nf_local_ctx);
 
 /**
+ * Enable direct RX/TX on two manager-reserved ports, using queue 0.
+ * Call after NF initialization and before run; one NF per process, with a
+ * disjoint port pair per NF. All RX/TX must run on that NF's event-loop thread.
+ * Packet handlers use OUT/DROP or retain packets by returning nonzero.
+ * Other NFs remain on rings. Returns 0 on success or a negative errno.
+ */
+int
+onvm_nflib_enable_direct_io(struct onvm_nf *nf, uint16_t n3_port, uint16_t n6_port);
+
+/**
  * Return a packet that was created by the NF or has previously had the
  * ONVM_NF_ACTION_BUFFER action called on it.
  *
@@ -149,7 +159,10 @@ onvm_nflib_return_pkt(struct onvm_nf *nf, struct rte_mbuf *pkt);
  * @param count
  *    the number of packets contained within the buffer.
  * @return
- *    0 on success, or a negative value on error (-1 if bad arguments, -ENOBUFS if enqueue fails).
+ *    0 on success, or a negative value on error (-1 if bad arguments,
+ *    -ENOBUFS if enqueue/TX is incomplete, -EINVAL for invalid direct TX actions/ports).
+ *    With valid arguments, ownership of every packet transfers to the library,
+ *    including on TX failure; callers must not access or free them afterwards.
  */
 int
 onvm_nflib_return_pkt_bulk(struct onvm_nf *nf, struct rte_mbuf **pkts, uint16_t count);

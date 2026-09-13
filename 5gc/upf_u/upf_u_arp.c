@@ -368,19 +368,20 @@ handle_arp_packet(struct rte_mbuf *pkt,
         pmeta->destination = port;
         pmeta->action = ONVM_NF_ACTION_OUT;
 
+        /* TX owns out_pkt after this call; log only the saved address values. */
         int rc = onvm_nflib_return_pkt(ctx->nf, out_pkt);
         if (rc < 0) {
             char sip_buf[16], tip_buf[16];
             UTLT_Warning("handle_arp_packet: failed to send ARP reply on port=%u rc=%d sip=%s tip=%s",
                         port, rc,
-                        ipv4_to_buf(out_arp->arp_data.arp_sip, sip_buf),
-                        ipv4_to_buf(out_arp->arp_data.arp_tip, tip_buf));
+                        ipv4_to_buf(target_ip_be, sip_buf),
+                        ipv4_to_buf(sender_ip_be, tip_buf));
         } else {
             char sip_buf[16], tip_buf[16];
             UTLT_Trace("handle_arp_packet: sent ARP reply on port=%u sip=%s tip=%s",
                         port,
-                        ipv4_to_buf(out_arp->arp_data.arp_sip, sip_buf),
-                        ipv4_to_buf(out_arp->arp_data.arp_tip, tip_buf));
+                        ipv4_to_buf(target_ip_be, sip_buf),
+                        ipv4_to_buf(sender_ip_be, tip_buf));
         }
 
         // This ARP Request packet is consumed by us, no need to pass to other NFs

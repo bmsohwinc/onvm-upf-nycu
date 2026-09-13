@@ -25,6 +25,7 @@
 
 extern uint32_t g_n3_ip_be;     // UPF local IP on the access-facing port
 extern uint32_t g_n6_ip_be;     // UPF local IP on the core/SGi-facing port
+extern uint8_t g_direct_io;    // Opt in to direct VF RX/TX instead of NF rings
 
 extern uint16_t  g_n3_port;      // UPF-U DPDK port connected to the access side (AN/gNB)
 extern uint16_t  g_n6_port;      // UPF-U DPDK port connected to the core side (SGi)
