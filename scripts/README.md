@@ -110,12 +110,17 @@ and exhausted worker capacity receive a PFCP rejection cached for retries.
 Without a worker list, FTUP stays absent and explicit SMF-selected F-TEIDs
 continue to work.
 
-The complete two-UE demo still requires the matching **SMF endpoint/QER
-changes**. The supplied `old_ref/smf` reference ignores FTUP and Created PDR.
-The next SMF increment must request CH, consume the returned endpoint before
-building N2 information, and use it in the session's tunnel/PDR. The reference
-files remain untouched. The existing UPF-C QER fallback is also retained until
-the SMF supplies each session's QERs independently.
+The matching SMF change is a separate commit, `9d572b9`, based on the L25GC
+SMF baseline `7ee2243`. Apply it to the deployed SMF and rebuild it. It records
+FTUP, requests CH, and consumes Created PDR before reporting establishment
+success. N2 setup uses the resolved session endpoint and advertises only one
+uplink tunnel in allocation mode. SMF's own TEID allocator bookkeeping and
+the gNB downlink TEID remain independent of the UPF allocation.
+
+Use one default UL/DL PDR pair per UE for this experiment. Additional PCC
+paths and NR-DC are outside this allocation model. The baseline SMF already
+creates QERs per session; UPF-C now installs only the supplied QERs and no
+longer borrows QER ID 1 from the first session.
 
 Rebuild the manager, UPF-C and both UPF-Us together, then restart them: the
 shared `UpfSession` layout changed. Generic ONVM NF structures and other NFs'

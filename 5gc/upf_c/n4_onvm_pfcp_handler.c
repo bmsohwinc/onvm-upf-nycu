@@ -1032,7 +1032,7 @@ Status UpfN4HandleCreateQer(UpfSession *session, CreateQER *createQer) {
     
     // Register QER to Session
     // need to implement this function
-    UTLT_Assert(UpfQERRegisterToSession(session, upfQer),
+    UTLT_Assert(UpfQERRegisterToSession(session, upfQer) == STATUS_OK,
         return STATUS_ERROR, "UpfQERRegisterToSession failed");
 
     return STATUS_OK;
@@ -1700,14 +1700,6 @@ Status UpfN4HandleSessionEstablishmentRequest(UpfSession *session, PfcpXact *pfc
             status = UpfN4HandleCreateQer(session, &request->createQER[i]);
             UTLT_Assert(status == STATUS_OK, cause = PFCP_CAUSE_REQUEST_REJECTED,
                 "Create QER error");
-        } else {
-            // TODO: This is hardcode
-            if (session->upfSeid > 1) {
-                UpfSession *s1 = UpfSessionFindBySeid(1);  // Get first creates session
-                UpfQER *upfQer = UpfQERFindByID(s1, 1);    // Always search QERID=1
-
-                UTLT_Assert(UpfQERRegisterToSession(session, upfQer), return STATUS_ERROR, "UpfQERRegisterToSession failed, seid=%d", session->upfSeid);
-            }
         }
     }
 

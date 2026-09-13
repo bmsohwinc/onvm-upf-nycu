@@ -283,6 +283,7 @@ Status UpfQERRegisterToSession(UpfSession *session, UpfQER *qer){
     UTLT_Assert(session->qer_list, return STATUS_ERROR, "QER list not initialized");
 
     list_rpush(session->qer_list, list_node_new(qer));
+    return STATUS_OK;
 }
 
 UpfPDR *UpfPDRFindByID(UpfSession *session, uint16_t id) {
