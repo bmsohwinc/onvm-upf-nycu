@@ -269,6 +269,7 @@ Status UpfPDRRegisterToSession(UpfSession *session, UpfPDR *pdr) {
     UTLT_Assert(session->pdr_list, return STATUS_ERROR, "PDR list not initialized");
 
     list_rpush(session->pdr_list, list_node_new(pdr));
+    return STATUS_OK;
 }
 
 Status UpfFARRegisterToSession(UpfSession *session, UpfFAR * far) {
@@ -276,6 +277,7 @@ Status UpfFARRegisterToSession(UpfSession *session, UpfFAR * far) {
     UTLT_Assert(session->far_list, return STATUS_ERROR, "FAR list not initialized");
 
     list_rpush(session->far_list, list_node_new(far));
+    return STATUS_OK;
 }
 
 Status UpfQERRegisterToSession(UpfSession *session, UpfQER *qer){

@@ -778,7 +778,7 @@ Status UpfN4HandleCreatePdr(UpfSession *session, CreatePDR *createPdr) {
     upfPdr->session_index = session->index;
 
     // Register PDR to Session
-    UTLT_Assert(UpfPDRRegisterToSession(session, upfPdr),
+    UTLT_Assert(UpfPDRRegisterToSession(session, upfPdr) == STATUS_OK,
                 rte_free(upfPdr);
                 return STATUS_ERROR,
                 "UpfPDRRegisterToSession failed");
@@ -905,7 +905,7 @@ Status UpfN4HandleCreateFar(UpfSession *session, CreateFAR *createFar) {
         return STATUS_ERROR, "Convert FAR TLV To Rule is failed");
 
     // Register FAR to Session
-    UTLT_Assert(UpfFARRegisterToSession(session, upfFar),
+    UTLT_Assert(UpfFARRegisterToSession(session, upfFar) == STATUS_OK,
                 return STATUS_ERROR,
                 "UpfFARRegisterToSession failed");
     return STATUS_OK;
@@ -1301,12 +1301,6 @@ Status UpfN4HandleUpdatePdr(UpfSession *session, UpdatePDR *updatePdr) {
 
     /* Pre-compute session index for O(1) buffer lookup in UPF-U */
     upfPdr->session_index = session->index;
-
-#ifdef CHECK
-    // Register PDR to Session
-    UTLT_Assert(UpfPDRRegisterToSession(session, &upfPdr),
-        return STATUS_ERROR, "UpfPDRRegisterToSession failed");
-#endif
 
     uint32_t new_ver;
     if (!UpfClsRebuildAndPublish(&new_ver)) {
@@ -1814,7 +1808,7 @@ Status UpfN4HandleSessionModificationRequest(UpfSession *session, PfcpXact *xact
             UTLT_Info("Update PDR [%d]", i);
             UTLT_Assert(request->updatePDR[i].pDRID.presence == 1, ,
                         "[PFCP] PdrId in updatePDR not presence!");
-            status = UpfN4HandleUpdatePdr(session, &request->updatePDR);
+            status = UpfN4HandleUpdatePdr(session, &request->updatePDR[i]);
             UTLT_Assert(status == STATUS_OK, return STATUS_ERROR,
                     "Modification: Update PDR[%d] error",i);
         }
