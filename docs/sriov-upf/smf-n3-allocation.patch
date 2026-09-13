@@ -1,0 +1,452 @@
+From 9d572b9e94dcbc3736842c69d71b6c21d47638b5 Mon Sep 17 00:00:00 2001
+From: bmsohwinc <bharasou58@gmail.com>
+Date: Sun, 13 Sep 2026 02:26:36 -0700
+Subject: [PATCH] smf: use UPF-allocated N3 endpoints for the single-tunnel
+ experiment
+
+SMF currently sends its own uplink TEID and the shared configured N3 address to the gNB. That prevents one UPF-C from returning different worker endpoints for different sessions.
+
+Record the FTUP capability during PFCP association and request IPv4 N3 allocation with CH=1. Consume Created PDR in establishPfcpSession before reporting success, match the returned PDR ID to the pending session request, and reject missing or invalid allocations. Store the resolved F-TEID in the existing PDR and update its uplink tunnel TEID.
+
+Build the N2 setup message from the resolved session endpoint. Suppress the additional NR-DC tunnel advertisement in FTUP mode because the experiment allocates one tunnel per UE. Keep the configured endpoint behavior when FTUP is absent, leave the gNB's downlink TEID path intact, and retain LocalULTeid as SMF allocator bookkeeping rather than freeing a UPF-assigned ID through that allocator.
+
+Based on 7ee22436f184000f25c3a348624559998eeb6e62. The experiment supports one IPv4 N3 allocation/PDR per session. Existing per-session QER management and PFCP dependencies are unchanged. Add focused tests for two distinct N2 endpoints, invalid allocations, response-buffer ownership, and legacy endpoint selection.
+---
+ internal/context/datapath.go          |   4 +
+ internal/context/n3_endpoint.go       |  69 +++++++++++++
+ internal/context/n3_endpoint_test.go  | 137 ++++++++++++++++++++++++++
+ internal/context/ngap_build.go        |  85 ++++++++--------
+ internal/context/upf.go               |   1 +
+ internal/sbi/processor/association.go |   2 +
+ internal/sbi/processor/datapath.go    |  33 ++++---
+ 7 files changed, 274 insertions(+), 57 deletions(-)
+ create mode 100644 internal/context/n3_endpoint.go
+ create mode 100644 internal/context/n3_endpoint_test.go
+
+diff --git a/internal/context/datapath.go b/internal/context/datapath.go
+index 0b88c1b..4d105ed 100644
+--- a/internal/context/datapath.go
++++ b/internal/context/datapath.go
+@@ -662,6 +662,10 @@ func (dataPath *DataPath) ActivateTunnelAndPDR(smContext *SMContext, precedence
+ 				}
+ 			}
+ 
++			if curDataPathNode.IsANUPF() && ULDestUPF.FTUP {
++				ULPDR.PDI.LocalFTeid = &pfcpType.FTEID{Ch: true, V4: true}
++			}
++
+ 			ULPDR.OuterHeaderRemoval = &pfcpType.OuterHeaderRemoval{
+ 				OuterHeaderRemovalDescription: pfcpType.OuterHeaderRemovalGtpUUdpIpv4,
+ 			}
+diff --git a/internal/context/n3_endpoint.go b/internal/context/n3_endpoint.go
+new file mode 100644
+index 0000000..dd1dfe8
+--- /dev/null
++++ b/internal/context/n3_endpoint.go
+@@ -0,0 +1,69 @@
++package context
++
++import (
++	"fmt"
++	"net"
++
++	"github.com/nycu-ucr/pfcp"
++	"github.com/nycu-ucr/pfcp/pfcpType"
++)
++
++// ApplyCreatedN3PDR resolves the single N3 tunnel requested by this experiment.
++// The existing PDR and tunnel own the endpoint; UPF configuration stays shared.
++func (c *SMContext) ApplyCreatedN3PDR(upf *UPF, created *pfcp.CreatedPDR) error {
++	if created == nil || created.PDRID == nil || created.LocalFTEID == nil {
++		return fmt.Errorf("UPF allocation requires Created PDR with PDR ID and F-TEID")
++	}
++	pfcpCtx := c.PFCPContext[upf.NodeID.ResolveNodeIdToIp().String()]
++	if pfcpCtx == nil {
++		return fmt.Errorf("missing PFCP session for allocated N3 endpoint")
++	}
++	pdr := pfcpCtx.PDRs[created.PDRID.RuleId]
++	if pdr == nil || pdr.PDI.SourceInterface.InterfaceValue != pfcpType.SourceInterfaceAccess ||
++		pdr.PDI.LocalFTeid == nil || !pdr.PDI.LocalFTeid.Ch {
++		return fmt.Errorf("Created PDR %d does not match an N3 allocation request", created.PDRID.RuleId)
++	}
++	for _, other := range pfcpCtx.PDRs {
++		if other != pdr && other.PDI.LocalFTeid != nil && other.PDI.LocalFTeid.Ch {
++			return fmt.Errorf("experiment supports one N3 allocation per session")
++		}
++	}
++	fteid := *created.LocalFTEID
++	if fteid.Ch || fteid.Chid || !fteid.V4 || fteid.V6 || fteid.Teid == 0 ||
++		fteid.Ipv4Address.To4() == nil || fteid.Ipv4Address.IsUnspecified() {
++		return fmt.Errorf("Created PDR requires a resolved IPv4 F-TEID")
++	}
++	for _, path := range c.Tunnel.DataPathPool {
++		node := path.FirstDPNode
++		if path.Activated && node != nil && node.UPF == upf &&
++			node.UpLinkTunnel != nil && node.UpLinkTunnel.PDR == pdr {
++			fteid.Ipv4Address = append(net.IP(nil), fteid.Ipv4Address.To4()...)
++			pdr.PDI.LocalFTeid = &fteid
++			node.UpLinkTunnel.TEID = fteid.Teid
++			// LocalULTeid remains an SMF allocator ID, released by RemoveSMContext.
++			return nil
++		}
++	}
++	return fmt.Errorf("Created PDR does not belong to an active N3 tunnel")
++}
++
++// N3Endpoint supplies the per-session endpoint to the N2 setup message.
++func (node *DataPathNode) N3Endpoint(pduSessionType uint8) (net.IP, uint32, error) {
++	if node.UPF.FTUP {
++		pdr := node.UpLinkTunnel.PDR
++		if pdr == nil || pdr.PDI.LocalFTeid == nil {
++			return nil, 0, fmt.Errorf("missing allocated N3 endpoint")
++		}
++		f := pdr.PDI.LocalFTeid
++		if f.Ch || f.Chid || !f.V4 || f.V6 || f.Teid == 0 ||
++			f.Ipv4Address.To4() == nil || f.Ipv4Address.IsUnspecified() || node.UpLinkTunnel.TEID != f.Teid {
++			return nil, 0, fmt.Errorf("N3 allocation is unresolved or inconsistent")
++		}
++		return f.Ipv4Address.To4(), f.Teid, nil
++	}
++	if len(node.UPF.N3Interfaces) == 0 {
++		return nil, 0, fmt.Errorf("missing configured N3 interface")
++	}
++	ip, err := node.UPF.N3Interfaces[0].IP(pduSessionType)
++	return ip, node.UpLinkTunnel.TEID, err
++}
+diff --git a/internal/context/n3_endpoint_test.go b/internal/context/n3_endpoint_test.go
+new file mode 100644
+index 0000000..b197d0d
+--- /dev/null
++++ b/internal/context/n3_endpoint_test.go
+@@ -0,0 +1,137 @@
++package context
++
++import (
++	"encoding/binary"
++	"net"
++	"testing"
++
++	"github.com/free5gc/aper"
++	"github.com/free5gc/ngap/ngapType"
++	"github.com/nycu-ucr/openapi/models"
++	"github.com/nycu-ucr/pfcp"
++	"github.com/nycu-ucr/pfcp/pfcpType"
++)
++
++func n3TestSession(upf *UPF, id uint16) (*SMContext, *DataPathNode) {
++	pdr := &PDR{PDRID: id, PDI: PDI{
++		SourceInterface: pfcpType.SourceInterface{InterfaceValue: pfcpType.SourceInterfaceAccess},
++		LocalFTeid:      &pfcpType.FTEID{Ch: true, V4: true},
++	}}
++	node := &DataPathNode{UPF: upf, UpLinkTunnel: &GTPTunnel{TEID: 77, PDR: pdr}}
++	c := &SMContext{
++		SmfPduSessionSmContextCreateData: &models.SmfPduSessionSmContextCreateData{},
++		LocalULTeid:                      77, SelectedPDUSessionType: 1,
++		Tunnel: &UPTunnel{DataPathPool: DataPathPool{
++			1: &DataPath{Activated: true, IsDefaultPath: true, FirstDPNode: node},
++		}},
++		PFCPContext: map[string]*PFCPSessionContext{
++			upf.NodeID.ResolveNodeIdToIp().String(): {PDRs: map[uint16]*PDR{id: pdr}},
++		},
++		SelectedSessionRuleID: "default",
++		SessionRules: map[string]*SessionRule{"default": {
++			DefQosQFI: 1,
++			SessionRule: &models.SessionRule{
++				AuthSessAmbr: &models.Ambr{Uplink: "1 Mbps", Downlink: "1 Mbps"},
++				AuthDefQos:   &models.AuthorizedDefaultQos{Var5qi: 9, Arp: &models.Arp{PriorityLevel: 8}},
++			},
++		}},
++	}
++	return c, node
++}
++
++func n3TestUPF() *UPF {
++	return &UPF{FTUP: true,
++		NodeID:       pfcpType.NodeID{NodeIdType: pfcpType.NodeIdTypeIpv4Address, IP: net.ParseIP("127.0.0.8").To4()},
++		N3Interfaces: []*UPFInterfaceInfo{{IPv4EndPointAddresses: []net.IP{net.ParseIP("198.51.100.1").To4()}}},
++	}
++}
++
++func n3TestCreated(id uint16, teid uint32, ip string) *pfcp.CreatedPDR {
++	return &pfcp.CreatedPDR{
++		PDRID:      &pfcpType.PacketDetectionRuleID{RuleId: id},
++		LocalFTEID: &pfcpType.FTEID{V4: true, Teid: teid, Ipv4Address: net.ParseIP(ip).To4()},
++	}
++}
++
++func TestAllocatedN3EndpointsInSetup(t *testing.T) {
++	upf := n3TestUPF()
++	for i, ip := range []string{"192.0.2.11", "192.0.2.12"} {
++		id, teid := uint16(i+1), uint32(0x1001+i)
++		c, node := n3TestSession(upf, id)
++		if _, err := BuildPDUSessionResourceSetupRequestTransfer(c); err == nil {
++			t.Fatal("N2 setup accepted an unresolved allocation")
++		}
++		created := n3TestCreated(id, teid, ip)
++		if err := c.ApplyCreatedN3PDR(upf, created); err != nil {
++			t.Fatal(err)
++		}
++		// Decoded PFCP storage can be reused after processing the response.
++		created.LocalFTEID.Ipv4Address[0] = 1
++		buf, err := BuildPDUSessionResourceSetupRequestTransfer(c)
++		if err != nil {
++			t.Fatal(err)
++		}
++		var setup ngapType.PDUSessionResourceSetupRequestTransfer
++		if err := aper.UnmarshalWithParams(buf, &setup, "valueExt"); err != nil {
++			t.Fatal(err)
++		}
++		found := false
++		for _, ie := range setup.ProtocolIEs.List {
++			switch ie.Id.Value {
++			case ngapType.ProtocolIEIDULNGUUPTNLInformation:
++				gtp := ie.Value.ULNGUUPTNLInformation.GTPTunnel
++				if !net.IP(gtp.TransportLayerAddress.Value.Bytes).Equal(net.ParseIP(ip)) ||
++					binary.BigEndian.Uint32(gtp.GTPTEID.Value) != teid {
++					t.Fatal("wrong allocated N3 endpoint in N2")
++				}
++				found = true
++			case ngapType.ProtocolIEIDAdditionalULNGUUPTNLInformation:
++				t.Fatal("allocation experiment advertised an additional tunnel")
++			}
++		}
++		if !found || c.LocalULTeid != 77 || node.UpLinkTunnel.TEID != teid {
++			t.Fatal("missing N2 tunnel or incorrect allocator/tunnel state")
++		}
++	}
++	if !upf.N3Interfaces[0].IPv4EndPointAddresses[0].Equal(net.ParseIP("198.51.100.1")) {
++		t.Fatal("session allocation changed shared UPF configuration")
++	}
++}
++
++func TestCreatedN3PDRRejectsInvalidAllocation(t *testing.T) {
++	cases := map[string]func(**pfcp.CreatedPDR){
++		"missing":        func(p **pfcp.CreatedPDR) { *p = nil },
++		"missing ID":     func(p **pfcp.CreatedPDR) { (*p).PDRID = nil },
++		"wrong ID":       func(p **pfcp.CreatedPDR) { (*p).PDRID.RuleId = 99 },
++		"missing FTEID":  func(p **pfcp.CreatedPDR) { (*p).LocalFTEID = nil },
++		"unresolved":     func(p **pfcp.CreatedPDR) { (*p).LocalFTEID.Ch = true },
++		"zero TEID":      func(p **pfcp.CreatedPDR) { (*p).LocalFTEID.Teid = 0 },
++		"missing IP":     func(p **pfcp.CreatedPDR) { (*p).LocalFTEID.Ipv4Address = nil },
++		"unspecified IP": func(p **pfcp.CreatedPDR) { (*p).LocalFTEID.Ipv4Address = net.IPv4zero },
++		"IPv6":           func(p **pfcp.CreatedPDR) { (*p).LocalFTEID.V6 = true },
++	}
++	for name, mutate := range cases {
++		t.Run(name, func(t *testing.T) {
++			upf := n3TestUPF()
++			c, node := n3TestSession(upf, 1)
++			p := n3TestCreated(1, 0x1001, "192.0.2.11")
++			mutate(&p)
++			if c.ApplyCreatedN3PDR(upf, p) == nil {
++				t.Fatal("invalid allocation accepted")
++			}
++			if !node.UpLinkTunnel.PDR.PDI.LocalFTeid.Ch || node.UpLinkTunnel.TEID != 77 {
++				t.Fatal("rejected response modified session state")
++			}
++		})
++	}
++}
++
++func TestLegacyN3Endpoint(t *testing.T) {
++	upf := n3TestUPF()
++	upf.FTUP = false
++	c, node := n3TestSession(upf, 1)
++	ip, teid, err := node.N3Endpoint(c.SelectedPDUSessionType)
++	if err != nil || teid != 77 || !ip.Equal(net.ParseIP("198.51.100.1")) {
++		t.Fatal("legacy configured endpoint changed")
++	}
++}
+diff --git a/internal/context/ngap_build.go b/internal/context/ngap_build.go
+index d906161..2ad973f 100644
+--- a/internal/context/ngap_build.go
++++ b/internal/context/ngap_build.go
+@@ -16,10 +16,11 @@ func BuildPDUSessionResourceSetupRequestTransfer(ctx *SMContext) ([]byte, error)
+ 	ANUPF := ctx.Tunnel.DataPathPool.GetDefaultPath().FirstDPNode
+ 	UpNode := ANUPF.UPF
+ 	teidOct := make([]byte, 4)
+-	teidOctForSplitPDUSession := make([]byte, 4)
+-	binary.BigEndian.PutUint32(teidOct, ctx.LocalULTeid)
+-	binary.BigEndian.PutUint32(teidOctForSplitPDUSession, ctx.LocalULTeidForSplitPDUSession)
+- 
++	n3IP, teid, err := ANUPF.N3Endpoint(ctx.SelectedPDUSessionType)
++	if err != nil {
++		return nil, err
++	}
++	binary.BigEndian.PutUint32(teidOct, teid)
+ 
+ 	resourceSetupRequestTransfer := ngapType.PDUSessionResourceSetupRequestTransfer{}
+ 
+@@ -50,59 +51,59 @@ func BuildPDUSessionResourceSetupRequestTransfer(ctx *SMContext) ([]byte, error)
+ 	ie = ngapType.PDUSessionResourceSetupRequestTransferIEs{}
+ 	ie.Id.Value = ngapType.ProtocolIEIDULNGUUPTNLInformation
+ 	ie.Criticality.Value = ngapType.CriticalityPresentReject
+-	if n3IP, err := UpNode.N3Interfaces[0].IP(ctx.SelectedPDUSessionType); err != nil {
+-		return nil, err
+-	} else {
+-		ie.Value = ngapType.PDUSessionResourceSetupRequestTransferIEsValue{
+-			Present: ngapType.PDUSessionResourceSetupRequestTransferIEsPresentULNGUUPTNLInformation,
+-			ULNGUUPTNLInformation: &ngapType.UPTransportLayerInformation{
+-				Present: ngapType.UPTransportLayerInformationPresentGTPTunnel,
+-				GTPTunnel: &ngapType.GTPTunnel{
+-					TransportLayerAddress: ngapType.TransportLayerAddress{
+-						Value: aper.BitString{
+-							Bytes:     n3IP,
+-							BitLength: uint64(len(n3IP) * 8),
+-						},
++	ie.Value = ngapType.PDUSessionResourceSetupRequestTransferIEsValue{
++		Present: ngapType.PDUSessionResourceSetupRequestTransferIEsPresentULNGUUPTNLInformation,
++		ULNGUUPTNLInformation: &ngapType.UPTransportLayerInformation{
++			Present: ngapType.UPTransportLayerInformationPresentGTPTunnel,
++			GTPTunnel: &ngapType.GTPTunnel{
++				TransportLayerAddress: ngapType.TransportLayerAddress{
++					Value: aper.BitString{
++						Bytes:     n3IP,
++						BitLength: uint64(len(n3IP) * 8),
+ 					},
+-					GTPTEID: ngapType.GTPTEID{Value: teidOct},
+ 				},
++				GTPTEID: ngapType.GTPTEID{Value: teidOct},
+ 			},
+-		}
++		},
+ 	}
+ 
+ 	resourceSetupRequestTransfer.ProtocolIEs.List = append(resourceSetupRequestTransfer.ProtocolIEs.List, ie)
+ 
+-	// Additional UL NG-U UP TNL Information
+-	ie = ngapType.PDUSessionResourceSetupRequestTransferIEs{}
+-	ie.Id.Value = ngapType.ProtocolIEIDAdditionalULNGUUPTNLInformation
+-	ie.Criticality.Value = ngapType.CriticalityPresentIgnore
+-	if n3IP, err := UpNode.N3Interfaces[0].IP(ctx.SelectedPDUSessionType); err != nil {
+-		return nil, err
+-	} else {
+-		ie.Value = ngapType.PDUSessionResourceSetupRequestTransferIEsValue{
+-			Present: ngapType.PDUSessionResourceSetupRequestTransferIEsPresentAdditionalULNGUUPTNLInformation,
+-			AdditionalULNGUUPTNLInformation: &ngapType.UPTransportLayerInformationList{
+-				List: []ngapType.UPTransportLayerInformationItem{
+-					{
+-						NGUUPTNLInformation: ngapType.UPTransportLayerInformation{
+-							Present: ngapType.UPTransportLayerInformationPresentGTPTunnel,
+-							GTPTunnel: &ngapType.GTPTunnel{
+-								TransportLayerAddress: ngapType.TransportLayerAddress{
+-									Value: aper.BitString{
+-										Bytes:     n3IP,
+-										BitLength: uint64(len(n3IP) * 8),
++	// The allocation experiment has one N3 tunnel; retain legacy NR-DC behavior otherwise.
++	if !UpNode.FTUP {
++		teidOctForSplitPDUSession := make([]byte, 4)
++		binary.BigEndian.PutUint32(teidOctForSplitPDUSession, ctx.LocalULTeidForSplitPDUSession)
++		// Additional UL NG-U UP TNL Information
++		ie = ngapType.PDUSessionResourceSetupRequestTransferIEs{}
++		ie.Id.Value = ngapType.ProtocolIEIDAdditionalULNGUUPTNLInformation
++		ie.Criticality.Value = ngapType.CriticalityPresentIgnore
++		if n3IP, err := UpNode.N3Interfaces[0].IP(ctx.SelectedPDUSessionType); err != nil {
++			return nil, err
++		} else {
++			ie.Value = ngapType.PDUSessionResourceSetupRequestTransferIEsValue{
++				Present: ngapType.PDUSessionResourceSetupRequestTransferIEsPresentAdditionalULNGUUPTNLInformation,
++				AdditionalULNGUUPTNLInformation: &ngapType.UPTransportLayerInformationList{
++					List: []ngapType.UPTransportLayerInformationItem{
++						{
++							NGUUPTNLInformation: ngapType.UPTransportLayerInformation{
++								Present: ngapType.UPTransportLayerInformationPresentGTPTunnel,
++								GTPTunnel: &ngapType.GTPTunnel{
++									TransportLayerAddress: ngapType.TransportLayerAddress{
++										Value: aper.BitString{
++											Bytes:     n3IP,
++											BitLength: uint64(len(n3IP) * 8),
++										},
+ 									},
++									GTPTEID: ngapType.GTPTEID{Value: teidOctForSplitPDUSession},
+ 								},
+-								GTPTEID: ngapType.GTPTEID{Value: teidOctForSplitPDUSession},
+ 							},
+ 						},
+ 					},
+ 				},
+-			},
++			}
+ 		}
++		resourceSetupRequestTransfer.ProtocolIEs.List = append(resourceSetupRequestTransfer.ProtocolIEs.List, ie)
+ 	}
+-	resourceSetupRequestTransfer.ProtocolIEs.List = append(resourceSetupRequestTransfer.ProtocolIEs.List, ie)
+-
+ 
+ 	// PDU Session Type
+ 	ie = ngapType.PDUSessionResourceSetupRequestTransferIEs{}
+diff --git a/internal/context/upf.go b/internal/context/upf.go
+index dee2e8a..4b57e56 100644
+--- a/internal/context/upf.go
++++ b/internal/context/upf.go
+@@ -69,6 +69,7 @@ type UPF struct {
+ 	NodeID            pfcpType.NodeID
+ 	Addr              string
+ 	RecoveryTimeStamp time.Time
++	FTUP              bool // UPF allocates the N3 F-TEID during PFCP establishment.
+ 
+ 	AssociationContext context.Context
+ 	CancelAssociation  context.CancelFunc
+diff --git a/internal/sbi/processor/association.go b/internal/sbi/processor/association.go
+index d0815fe..9c6a3eb 100644
+--- a/internal/sbi/processor/association.go
++++ b/internal/sbi/processor/association.go
+@@ -101,6 +101,8 @@ func setupPfcpAssociation(upf *smf_context.UPF, upfStr string) error {
+ 	if nodeID == nil {
+ 		return fmt.Errorf("pfcp association needs NodeID")
+ 	}
++	upf.FTUP = rsp.UPFunctionFeatures != nil &&
++		rsp.UPFunctionFeatures.SupportedFeatures&pfcpType.UpFunctionFeaturesFtup != 0
+ 
+ 	logger.MainLog.Infof("Received PFCP Association Setup Accepted Response from UPF%s", upfStr)
+ 	logger.MainLog.Infof("UPF(%s) setup association", upf.NodeID.ResolveNodeIdToIp().String())
+diff --git a/internal/sbi/processor/datapath.go b/internal/sbi/processor/datapath.go
+index fed06d7..900afe0 100644
+--- a/internal/sbi/processor/datapath.go
++++ b/internal/sbi/processor/datapath.go
+@@ -141,25 +141,28 @@ func establishPfcpSession(smContext *smf_context.SMContext,
+ 	}
+ 
+ 	rsp := rcvMsg.PfcpMessage.Body.(pfcp.PFCPSessionEstablishmentResponse)
+-	if rsp.UPFSEID != nil {
+-		NodeIDtoIP := rsp.NodeID.ResolveNodeIdToIp().String()
+-		pfcpSessionCtx := smContext.PFCPContext[NodeIDtoIP]
+-		pfcpSessionCtx.RemoteSEID = rsp.UPFSEID.Seid
+-	}
+-
+-	if rsp.Cause != nil && rsp.Cause.CauseValue == pfcpType.CauseRequestAccepted {
+-		logger.PduSessLog.Infoln("Received PFCP Session Establishment Accepted Response")
+-		resCh <- SendPfcpResult{
+-			Status: smf_context.SessionEstablishSuccess,
+-			RcvMsg: rcvMsg,
+-		}
+-	} else {
+-		logger.PduSessLog.Infoln("Received PFCP Session Establishment Not Accepted Response")
++	if rsp.Cause == nil || rsp.Cause.CauseValue != pfcpType.CauseRequestAccepted {
+ 		resCh <- SendPfcpResult{
+ 			Status: smf_context.SessionEstablishFailed,
+-			Err:    fmt.Errorf("cause[%d] if not request accepted", rsp.Cause.CauseValue),
++			Err:    fmt.Errorf("PFCP establishment not accepted: cause=%+v", rsp.Cause),
++		}
++		return
++	}
++	pfcpSessionCtx := smContext.PFCPContext[state.upf.NodeID.ResolveNodeIdToIp().String()]
++	if pfcpSessionCtx == nil || rsp.UPFSEID == nil || rsp.UPFSEID.Seid == 0 {
++		resCh <- SendPfcpResult{Status: smf_context.SessionEstablishFailed,
++			Err: fmt.Errorf("accepted PFCP establishment is missing session/F-SEID")}
++		return
++	}
++	if state.upf.FTUP {
++		if err := smContext.ApplyCreatedN3PDR(state.upf, rsp.CreatedPDR); err != nil {
++			resCh <- SendPfcpResult{Status: smf_context.SessionEstablishFailed, Err: err}
++			return
+ 		}
+ 	}
++	pfcpSessionCtx.RemoteSEID = rsp.UPFSEID.Seid
++	logger.PduSessLog.Infoln("Received PFCP Session Establishment Accepted Response")
++	resCh <- SendPfcpResult{Status: smf_context.SessionEstablishSuccess, RcvMsg: rcvMsg}
+ }
+ 
+ func modifyExistingPfcpSession(
+-- 
+2.39.5 (Apple Git-154)
+

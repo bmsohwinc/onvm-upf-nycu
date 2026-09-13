@@ -46,7 +46,7 @@ for dev in $ONVM_ALLOW_LIST; do
     allow_args+=(--allow "$dev")
 done
 
-# Worker 1; run worker 2 in another shell with -l 5, -r 15 and its own YAML.
+# Worker 1; run worker 2 in another shell with -l 14, -r 15 and its own YAML.
 sudo ./build/5gc/l25gc_upf_u -l 3 -n 4 --proc-type=secondary \
     "${allow_args[@]}" -- -r 14 -m -- /path/to/upf_u_1.yaml
 ```

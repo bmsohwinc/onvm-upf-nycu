@@ -13,6 +13,10 @@ This disaggregation allows for rapid updates to PDRs and session state without i
 
 ## Getting Started
 
+For the two-worker Intel 82599 experiment, follow the
+[SR-IOV UPF setup guide](docs/sriov-upf/README.md). It covers VF binding,
+static NIC rules, per-worker configs, the companion SMF patch and traffic checks.
+
 We've provided two scripts to install required dependencies, and configure your machine to run OpenNetVM. Required dependencies are installed by [`scripts/install.sh`](/scripts/install.sh), and configuration is done by [`scripts/setup_runtime.sh`](/scripts/setup_runtime.sh).
 
 From the `onvm-upf` folder, run the following two commands:
