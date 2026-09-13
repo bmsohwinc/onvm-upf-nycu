@@ -351,7 +351,7 @@ UpfSession *UpfSessionAdd(PfcpUeIpAddr *ueIp,
     UTLT_Assert(pdnType == PFCP_PDN_TYPE_IPV4 && ueIp->v4 && !ueIp->v6,
                 return NULL, "Only IPv4 sessions are supported");
     UTLT_Assert(!teid->ch && teid->v4 && !teid->v6, return NULL,
-                "An explicit IPv4 F-TEID is required until UPF TEID allocation is enabled");
+                "UpfSessionAdd requires a resolved IPv4 F-TEID");
     UTLT_Assert(dnn && dnn_len && dnn_len <= MAX_DNN_LEN, return NULL, "Invalid DNN");
     uint32_t ue_key = rte_be_to_cpu_32(ueIp->addr4.s_addr);
     uint32_t teid_key = rte_be_to_cpu_32(teid->teid);
@@ -435,72 +435,98 @@ Status UpfSessionRemove(UpfSession *session) {
     return STATUS_OK;
 }
 
-UpfSession *UpfSessionAddByMessage(PfcpMessage *message) {
-    UTLT_Debug("UpfSessionAddByMessage"); 
-    UpfSession *session;
+UpfSession *UpfSessionAddByMessage(PfcpMessage *message, uint8_t *cause) {
+    PFCPSessionEstablishmentRequest *request = &message->pFCPSessionEstablishmentRequest;
+    *cause = PFCP_CAUSE_MANDATORY_IE_MISSING;
+    UTLT_Assert(request->nodeID.presence && request->cPFSEID.presence &&
+                request->pDNType.presence && request->createFAR[0].presence,
+                return NULL, "Missing session establishment IE");
+    *cause = PFCP_CAUSE_INVALID_LENGTH;
+    UTLT_Assert(request->cPFSEID.value && request->cPFSEID.len >= PFCP_F_SEID_HDR_LEN &&
+                request->pDNType.value && request->pDNType.len == 1,
+                return NULL, "Incomplete session identifiers");
 
-    PFCPSessionEstablishmentRequest *request =
-      &message->pFCPSessionEstablishmentRequest;
-    if (!request->nodeID.presence) {
-        UTLT_Error("no NodeID");
-        return NULL;
+    /* Find the N3 PDR by Source Interface, independent of Create PDR order.
+     * The demo has one uplink tunnel per session and one Created PDR response. */
+    CreatePDR *uplink = NULL;
+    unsigned fteid_count = 0;
+    for (unsigned i = 0; i < sizeof(request->createPDR) / sizeof(request->createPDR[0]); i++) {
+        CreatePDR *pdr = &request->createPDR[i];
+        if (!pdr->presence || !pdr->pDI.presence) continue;
+        PDI *pdi = &pdr->pDI;
+        if (pdi->localFTEID.presence) fteid_count++;
+        if (!uplink && pdi->localFTEID.presence && pdi->sourceInterface.presence &&
+            pdi->sourceInterface.value && pdi->sourceInterface.len == 1 &&
+            (*(uint8_t *)pdi->sourceInterface.value & 0x0f) == 0)
+            uplink = pdr;
     }
-    if (!request->cPFSEID.presence) {
-        UTLT_Error("No cp F-SEID");
-        return NULL;
-    }
-    if (!request->createPDR[0].presence) {
-        UTLT_Error("No PDR");
-        return NULL;
-    }
-    
-    if (!request->createFAR[0].presence) {
-        UTLT_Error("No FAR");
-        return NULL;
-    }
-    
-    if (!request->pDNType.presence) {
-        UTLT_Error("No PDN Type");
-        return NULL;
-    }
-    if (!request->createPDR[0].pDI.presence) {
-        UTLT_Error("PDR PDI error");
-        return NULL;
-    }
-    if (!request->createPDR[0].pDI.uEIPAddress.presence) {
-        UTLT_Error("UE IP Address error");
-        return NULL;
-    }
-    if (!request->createPDR[0].pDI.networkInstance.presence) {
-        UTLT_Error("Interface error");
-        return NULL;
+    *cause = PFCP_CAUSE_MANDATORY_IE_MISSING;
+    UTLT_Assert(uplink && uplink->pDRID.presence && uplink->pDI.uEIPAddress.presence &&
+                uplink->pDI.networkInstance.presence, return NULL, "Missing uplink PDR identifiers");
+    PDI *pdi = &uplink->pDI;
+    FTEID *ie = &pdi->localFTEID;
+    *cause = PFCP_CAUSE_INVALID_LENGTH;
+    UTLT_Assert(uplink->pDRID.value && uplink->pDRID.len == sizeof(uint16_t) &&
+                pdi->uEIPAddress.value && pdi->uEIPAddress.len >= 5 &&
+                pdi->networkInstance.value && pdi->networkInstance.len &&
+                pdi->networkInstance.len <= MAX_DNN_LEN && ie->value && ie->len >= 1,
+                return NULL, "Incomplete uplink PDR identifiers");
+
+    /* A CH request contains only flags (and optionally Choose ID), not a TEID. */
+    PfcpFTeid *input = ie->value;
+    bool choose = input->ch;
+    PfcpFTeid resolved = {0};
+    *cause = PFCP_CAUSE_INVALID_F_TEID_ALLOCATION_OPTION;
+    UTLT_Assert(input->v4 && !input->v6 && choose == (Self()->workerCount != 0),
+                return NULL, "Worker mode requires CH=1 IPv4; legacy mode requires an explicit IPv4 F-TEID");
+    if (choose) {
+        UTLT_Assert(fteid_count == 1, return NULL, "Worker demo supports one N3 F-TEID per session");
+        *cause = PFCP_CAUSE_INVALID_LENGTH;
+        UTLT_Assert(ie->len == 1 + input->chid, return NULL, "Invalid CH F-TEID length");
+        *cause = PFCP_CAUSE_NO_RESOURCES_AVAILABLE;
+        UTLT_Assert(Self()->nextWorker < Self()->workerCount, return NULL, "No unused UPF-U worker");
+        const UpfWorker *worker = &Self()->workers[Self()->nextWorker];
+        resolved.v4 = 1;
+        resolved.teid = rte_cpu_to_be_32(worker->ul_teid);
+        resolved.addr4 = worker->n3_addr;
+    } else {
+        UTLT_Assert(!input->chid, return NULL, "Choose ID requires CH=1");
+        *cause = PFCP_CAUSE_INVALID_LENGTH;
+        UTLT_Assert(ie->len == PFCP_F_TEID_IPV4_LEN, return NULL, "Invalid IPv4 F-TEID length");
+        memcpy(&resolved, input, PFCP_F_TEID_IPV4_LEN);
     }
 
-    if (!request->createPDR[0].pDI.localFTEID.presence) {
-        UTLT_Error("TEID error");
-        return NULL;
+    /* Reserve replacement storage before assigning a session. The PFCP parser
+     * owns IE values; expanding the original one-byte CH buffer is unsafe. */
+    void *replacement = NULL;
+    if (choose) {
+        *cause = PFCP_CAUSE_NO_RESOURCES_AVAILABLE;
+        replacement = UTLT_Malloc(PFCP_F_TEID_IPV4_LEN);
+        UTLT_Assert(replacement, return NULL, "F-TEID allocation failed");
+        memcpy(replacement, &resolved, PFCP_F_TEID_IPV4_LEN);
     }
 
-    UTLT_Assert(request->pDNType.value && request->pDNType.len >= 1 &&
-                request->cPFSEID.value && request->cPFSEID.len >= 9 &&
-                request->createPDR[0].pDI.uEIPAddress.value &&
-                request->createPDR[0].pDI.uEIPAddress.len >= 5 &&
-                request->createPDR[0].pDI.localFTEID.value &&
-                request->createPDR[0].pDI.localFTEID.len >= 9,
-                return NULL, "Incomplete IPv4 session identifiers");
-
-    session = UpfSessionAdd((PfcpUeIpAddr *)
-                            request->createPDR[0].pDI.uEIPAddress.value,
-                            (PfcpFTeid *) request->createPDR[0].pDI.localFTEID.value,
-                            request->createPDR[0].pDI.networkInstance.value,
-                            request->createPDR[0].pDI.networkInstance.len,
-                            ((int8_t *)request->pDNType.value)[0]);
-    UTLT_Assert(session, return NULL, "session add error");
-
+    *cause = PFCP_CAUSE_REQUEST_REJECTED;
+    UpfSession *session = UpfSessionAdd(pdi->uEIPAddress.value, &resolved,
+                            pdi->networkInstance.value, pdi->networkInstance.len,
+                            *(uint8_t *)request->pDNType.value);
+    if (!session) {
+        if (replacement) UTLT_Free(replacement);
+        return NULL;
+    }
     session->smfSeid = rte_be_to_cpu_64(((PfcpFSeid *)request->cPFSEID.value)->seid);
-    // DumpUpfSession();
-    UTLT_Debug("UPF Establishment UPF SEID: %lu", session->upfSeid);
-    UTLT_Debug("UPF Establishment SMF SEID: %lu", session->smfSeid);
-
+    uint16_t pdr_id;
+    memcpy(&pdr_id, uplink->pDRID.value, sizeof(pdr_id));
+    session->uplink_pdr_id = ntohs(pdr_id);
+    session->uplink_teid_allocated = choose;
+    if (choose) {
+        UTLT_Free(ie->value);
+        ie->value = replacement;
+        ie->len = PFCP_F_TEID_IPV4_LEN;
+        UTLT_Info("Allocated N3 F-TEID: service=%u TEID=%u IP=%s PDR=%u",
+                    session->worker.service_id, session->teid,
+                    inet_ntoa(session->worker.n3_addr), session->uplink_pdr_id);
+    }
+    *cause = PFCP_CAUSE_REQUEST_ACCEPTED;
     return session;
 }

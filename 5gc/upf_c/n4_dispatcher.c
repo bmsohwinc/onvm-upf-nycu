@@ -25,6 +25,23 @@
 #include "pfcp_path.h"
 #include "n4_onvm_pfcp_build.h"
 #include "upf_context.h"
+#include <rte_byteorder.h>
+
+static void RejectSessionEstablishment(PfcpMessage *message, PfcpXact *xact, uint8_t cause) {
+    PFCPSessionEstablishmentRequest *request = &message->pFCPSessionEstablishmentRequest;
+    PfcpHeader header = {0};
+    header.type = PFCP_SESSION_ESTABLISHMENT_RESPONSE;
+    if (request->cPFSEID.presence && request->cPFSEID.value && request->cPFSEID.len >= PFCP_F_SEID_HDR_LEN)
+        header.seid = rte_be_to_cpu_64(((PfcpFSeid *)request->cPFSEID.value)->seid);
+
+    Bufblk *response = NULL;
+    UTLT_Assert(UpfN4BuildSessionEstablishmentResponse(&response, header.type, NULL, cause, request) == STATUS_OK,
+                return, "Cannot build session rejection");
+    UTLT_Assert(PfcpXactUpdateTx(xact, &header, response) == STATUS_OK,
+                BufblkFree(response); return, "Cannot cache session rejection");
+    UTLT_Assert(PfcpXactCommit(xact) == STATUS_OK, return, "Cannot send session rejection");
+    UTLT_Warning("Session establishment rejected: cause=%u", cause);
+}
 
 void UpfDispatcher(const Event *event) {
     switch ((UpfEvent)event->type) {
@@ -106,9 +123,14 @@ void UpfDispatcher(const Event *event) {
                 if (status == STATUS_EAGAIN) goto freeBuf;
                 UTLT_Assert(status == STATUS_OK, goto freeBuf, "PFCP transaction receive failed");
 
-                if (!session) session = UpfSessionAddByMessage(pfcpMessage);
-                UTLT_Assert(session, goto freeBuf,
-                            "do not find / establish session");
+                if (!session) {
+                    uint8_t cause;
+                    session = UpfSessionAddByMessage(pfcpMessage, &cause);
+                    if (!session) {
+                        RejectSessionEstablishment(pfcpMessage, xact, cause);
+                        goto freeBuf;
+                    }
+                }
 
                 if (pfcpMessage->header.type != PFCP_SESSION_REPORT_RESPONSE) {
                     session->pfcpNode = upf;

@@ -69,8 +69,8 @@ VF port IDs and worker N3 addresses:
 
 ```yaml
 upf_u_workers:
-  - {service_id: 14, n3_ip: 192.0.2.11, n3_port: 0, n6_port: 1}
-  - {service_id: 15, n3_ip: 192.0.2.12, n3_port: 2, n6_port: 3}
+  - {service_id: 14, n3_ip: 192.0.2.11, ul_teid: 0x1001, n3_port: 0, n6_port: 1}
+  - {service_id: 15, n3_ip: 192.0.2.12, ul_teid: 0x1002, n3_port: 2, n6_port: 3}
 ```
 
 Run UPF-C as service 2, and exactly one UPF-U per listed service. Each worker's
@@ -90,10 +90,32 @@ cannot consume a worker beyond the configured list. Assignments are not reused;
 restart all NFs between demo runs. Omitting the list preserves the existing
 single-UPF-U configuration and service 1 notifications.
 
-The complete two-UE demo still requires UPF-side TEID allocation, Created PDR
-responses, and the matching SMF endpoint/QER changes. PFCP currently uses
-SMF-supplied TEIDs; the configured `n3_ip` records/checks worker ownership.
-Returning that worker's N3 endpoint to SMF remains the next protocol step.
+`ul_teid` is required for each worker and accepts decimal or `0x` hexadecimal
+values in 1–4294967295. TEIDs must be distinct across workers because the shared
+uplink map uses TEID as its key. These static values can be used in the NIC
+rules installed before startup; UPF-C does not install those rules.
+
+With a worker list, UPF-C advertises FTUP in PFCP Association Setup Response.
+SMF must request an IPv4 N3 F-TEID with `CH=1`. UPF-C resolves that request to
+the selected worker's `ul_teid` and `n3_ip`, installs the resolved PDR, and
+returns the same pair in Created PDR with its uplink PDR ID. The uplink PDR
+is identified by Source Interface rather than its position in the message.
+This demo supports one N3 F-TEID per session; CH allocation is handled during
+establishment. The gNB-assigned downlink TEID in FAR updates remains unchanged.
+The CH/Created PDR exchange follows [TS 29.244, section 8.2.3](https://www.etsi.org/deliver/etsi_ts/129200_129299/129244/14.01.00_60/ts_129244v140100p.pdf).
+
+Worker mode rejects explicit SMF-selected F-TEIDs instead of overriding an
+endpoint that SMF may already have advertised. Invalid F-TEID allocation requests
+and exhausted worker capacity receive a PFCP rejection cached for retries.
+Without a worker list, FTUP stays absent and explicit SMF-selected F-TEIDs
+continue to work.
+
+The complete two-UE demo still requires the matching **SMF endpoint/QER
+changes**. The supplied `old_ref/smf` reference ignores FTUP and Created PDR.
+The next SMF increment must request CH, consume the returned endpoint before
+building N2 information, and use it in the session's tunnel/PDR. The reference
+files remain untouched. The existing UPF-C QER fallback is also retained until
+the SMF supplies each session's QERs independently.
 
 Rebuild the manager, UPF-C and both UPF-Us together, then restart them: the
 shared `UpfSession` layout changed. Generic ONVM NF structures and other NFs'

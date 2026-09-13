@@ -38,8 +38,10 @@ Status UpfN4BuildSessionEstablishmentResponse(Bufblk **bufBlk, uint8_t type,
     Status status;
     PfcpMessage pfcpMessage;
     PFCPSessionEstablishmentResponse *response = NULL;
-    PfcpFSeid fSeid;
-    PfcpNodeId nodeId;
+    PfcpFSeid fSeid = {0};
+    PfcpNodeId nodeId = {0};
+    PfcpFTeid fTeid = {0};
+    uint16_t uplinkPdrId;
     int len;
 
     response = &pfcpMessage.pFCPSessionEstablishmentResponse;
@@ -65,8 +67,25 @@ Status UpfN4BuildSessionEstablishmentResponse(Bufblk **bufBlk, uint8_t type,
         response->uPFSEID.value = &fSeid;
         fSeid.seid = htobe64(session->upfSeid);
         status = PfcpSockaddrToFSeid(Self()->pfcpAddr,
-                                     Self()->pfcpAddr, &fSeid, &len);
+                                     Self()->pfcpAddr6, &fSeid, &len);
+        UTLT_Assert(status == STATUS_OK, return STATUS_ERROR, "Cannot encode UPF F-SEID");
         response->uPFSEID.len = len;
+
+        if (session->uplink_teid_allocated) {
+            /* Only the N3 uplink allocation belongs here. The gNB's downlink
+             * TEID is supplied later in the FAR and must remain independent. */
+            uplinkPdrId = htons(session->uplink_pdr_id);
+            fTeid.v4 = 1;
+            fTeid.teid = htonl(session->teid);
+            fTeid.addr4 = session->worker.n3_addr;
+            response->createdPDR.presence = 1;
+            response->createdPDR.pDRID.presence = 1;
+            response->createdPDR.pDRID.len = sizeof(uplinkPdrId);
+            response->createdPDR.pDRID.value = &uplinkPdrId;
+            response->createdPDR.localFTEID.presence = 1;
+            response->createdPDR.localFTEID.len = PFCP_F_TEID_IPV4_LEN;
+            response->createdPDR.localFTEID.value = &fTeid;
+        }
 
         /* FQ-CSID */
     }
@@ -200,7 +219,8 @@ Status UpfN4BuildAssociationSetupResponse(Bufblk **bufBlkPtr, uint8_t type) {
     PfcpMessage pfcpMessage;
     PFCPAssociationSetupResponse *response = NULL;
     uint8_t cause;
-    uint16_t upFunctionFeature;
+    /* TS 29.244: FTUP is bit 5 of the first UP Function Features octet. */
+    uint8_t upFunctionFeature[2] = {0x10, 0};
 
     response = &pfcpMessage.pFCPAssociationSetupResponse;
     memset(&pfcpMessage, 0, sizeof(PfcpMessage));
@@ -227,13 +247,11 @@ Status UpfN4BuildAssociationSetupResponse(Bufblk **bufBlkPtr, uint8_t type) {
     response->recoveryTimeStamp.value = &Self()->recoveryTime;
     response->recoveryTimeStamp.len = 4;
 
-    // TODO: support UP Function Feature report
-    /* UP Function Feature (Condition) */
-    upFunctionFeature = 0;
-    if (upFunctionFeature) {
+    /* Worker mode allocates N3 F-TEIDs; legacy mode keeps SMF allocation. */
+    if (Self()->workerCount) {
         response->uPFunctionFeatures.presence = 1;
-        response->uPFunctionFeatures.value = &upFunctionFeature;
-        response->uPFunctionFeatures.len = 2;
+        response->uPFunctionFeatures.value = upFunctionFeature;
+        response->uPFunctionFeatures.len = sizeof(upFunctionFeature);
     } else {
         response->uPFunctionFeatures.presence = 0;
     }

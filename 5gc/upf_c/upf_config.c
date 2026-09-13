@@ -88,6 +88,17 @@ static Status ParseWorkers(YamlIter *config) {
                 field = 8;
                 UTLT_Assert(inet_pton(AF_INET, value, &worker.n3_addr) == 1 && worker.n3_addr.s_addr,
                             return STATUS_ERROR, "Invalid worker N3 IPv4 address: %s", value);
+            } else if (!strcmp(key, "ul_teid")) {
+                field = 16;
+                char *end;
+                UTLT_Assert(value[0] >= '0' && value[0] <= '9', return STATUS_ERROR,
+                            "ul_teid must be a positive decimal or hexadecimal integer");
+                errno = 0;
+                int base = !strncmp(value, "0x", 2) || !strncmp(value, "0X", 2) ? 16 : 10;
+                unsigned long teid = strtoul(value, &end, base);
+                UTLT_Assert(!errno && !*end && teid && teid <= UINT32_MAX,
+                            return STATUS_ERROR, "Invalid worker ul_teid: %s", value);
+                worker.ul_teid = (uint32_t)teid;
             } else {
                 UTLT_Error("Unknown UPF-U worker field: %s", key);
                 return STATUS_ERROR;
@@ -95,8 +106,8 @@ static Status ParseWorkers(YamlIter *config) {
             UTLT_Assert(!(fields & field), return STATUS_ERROR, "Duplicate worker field: %s", key);
             fields |= field;
         }
-        UTLT_Assert(fields == 15 && worker.service_id && worker.service_id != UPF_C_SERVICE_ID,
-                    return STATUS_ERROR, "Worker requires service_id, n3_port, n6_port and n3_ip; service 2 is UPF-C");
+        UTLT_Assert(fields == 31 && worker.service_id && worker.service_id != UPF_C_SERVICE_ID,
+                    return STATUS_ERROR, "Worker requires service_id, n3_port, n6_port, n3_ip and ul_teid; service 2 is UPF-C");
         UTLT_Assert(worker.n3_port != worker.n6_port &&
                     (direct_mask & (UINT64_C(1) << worker.n3_port)) &&
                     (direct_mask & (UINT64_C(1) << worker.n6_port)), return STATUS_ERROR,
@@ -104,14 +115,15 @@ static Status ParseWorkers(YamlIter *config) {
         for (uint16_t i = 0; i < Self()->workerCount; i++) {
             const UpfWorker *other = &Self()->workers[i];
             UTLT_Assert(worker.service_id != other->service_id &&
+                        worker.ul_teid != other->ul_teid &&
                         worker.n3_addr.s_addr != other->n3_addr.s_addr &&
                         worker.n3_port != other->n3_port && worker.n3_port != other->n6_port &&
                         worker.n6_port != other->n3_port && worker.n6_port != other->n6_port,
-                        return STATUS_ERROR, "Workers must have distinct services, N3 IPs and VF pairs");
+                        return STATUS_ERROR, "Workers must have distinct services, TEIDs, N3 IPs and VF pairs");
         }
         Self()->workers[Self()->workerCount++] = worker;
-        UTLT_Info("UPF-U worker service=%u N3=%s port=%u N6 port=%u",
-                    worker.service_id, inet_ntoa(worker.n3_addr), worker.n3_port, worker.n6_port);
+        UTLT_Info("UPF-U worker service=%u N3=%s port=%u N6 port=%u UL TEID=%u",
+                    worker.service_id, inet_ntoa(worker.n3_addr), worker.n3_port, worker.n6_port, worker.ul_teid);
     }
     UTLT_Assert(Self()->workerCount, return STATUS_ERROR, "upf_u_workers must not be empty");
     return STATUS_OK;

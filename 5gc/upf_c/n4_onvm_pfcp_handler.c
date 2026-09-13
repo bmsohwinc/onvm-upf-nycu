@@ -700,6 +700,23 @@ Status _ConvertCreatePDRTlvToRule(UpfPDR *upfPdr, CreatePDR *createPdr) {
     return STATUS_OK;
 }
 
+/* CH is resolved during establishment before rule conversion. Subsequent
+ * PDR updates must retain the worker's assigned endpoint and TEID-map key. */
+static Status CheckSessionFTeid(const UpfSession *session, const FTEID *ie) {
+    if (!ie->presence) return STATUS_OK;
+    UTLT_Assert(ie->value && ie->len >= 1, return STATUS_ERROR, "Incomplete F-TEID");
+    const PfcpFTeid *fteid = ie->value;
+    unsigned len = PFCP_F_TEID_HDR_LEN + (fteid->v4 ? 4 : 0) + (fteid->v6 ? 16 : 0);
+    UTLT_Assert(!fteid->ch && !fteid->chid && (fteid->v4 || fteid->v6) && ie->len == len,
+                return STATUS_ERROR, "Rule conversion requires a resolved F-TEID");
+    if (session->worker.service_id) {
+        UTLT_Assert(fteid->v4 && !fteid->v6 && ntohl(fteid->teid) == session->teid &&
+                    fteid->addr4.s_addr == session->worker.n3_addr.s_addr,
+                    return STATUS_ERROR, "PDR F-TEID differs from the assigned worker endpoint");
+    }
+    return STATUS_OK;
+}
+
 Status UpfN4HandleCreatePdr(UpfSession *session, CreatePDR *createPdr) {
     UTLT_Debug("Handle Create PDR");
 
@@ -711,6 +728,8 @@ Status UpfN4HandleCreatePdr(UpfSession *session, CreatePDR *createPdr) {
                 "Pdi not exist");
     UTLT_Assert(createPdr->pDI.sourceInterface.presence,
                 return STATUS_ERROR, "PDI SourceInterface not presence");
+    UTLT_Assert(CheckSessionFTeid(session, &createPdr->pDI.localFTEID) == STATUS_OK,
+                return STATUS_ERROR, "Invalid Create PDR F-TEID");
 
     uint16_t pdrID = ntohs(*((uint16_t*) createPdr->pDRID.value));
 
@@ -1235,6 +1254,10 @@ Status _ConvertUpdatePDRTlvToRule(UpfPDR *upfPdr, UpdatePDR *updatePDR) {
 
 Status UpfN4HandleUpdatePdr(UpfSession *session, UpdatePDR *updatePdr) {
     UTLT_Debug("Handle Update PDR");
+    if (updatePdr->pDI.presence) {
+        UTLT_Assert(CheckSessionFTeid(session, &updatePdr->pDI.localFTEID) == STATUS_OK,
+                    return STATUS_ERROR, "Invalid Update PDR F-TEID");
+    }
 
     UTLT_Assert(updatePdr->pDRID.presence == 1,
                 return STATUS_ERROR, "updatePDR no pdrId");
