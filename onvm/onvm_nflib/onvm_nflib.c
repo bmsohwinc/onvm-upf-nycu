@@ -60,7 +60,6 @@
 
 #include "onvm_includes.h"
 #include "onvm_nflib.h"
-#include "onvm_direct_io.h"
 #include "onvm_sc_common.h"
 
 /**********************************Macros*************************************/
@@ -596,7 +595,6 @@ onvm_nflib_thread_main_loop(void *arg) {
 
         nf_local_ctx = (struct onvm_nf_local_ctx *)arg;
         nf = nf_local_ctx->nf;
-        const int direct = onvm_direct_io_matches(nf);
         nf->timeout_flag = false;
 
         onvm_threading_core_affinitize(nf->thread_info.core);
@@ -625,25 +623,19 @@ onvm_nflib_thread_main_loop(void *arg) {
         int init_timeout = 0;
         for (;rte_atomic16_read(&nf_local_ctx->keep_running) && rte_atomic16_read(&main_nf_local_ctx->keep_running);) {
                 /* Possibly sleep if in shared core mode, otherwise continue */
-                if (ONVM_NF_SHARE_CORES && !direct) {
+                if (ONVM_NF_SHARE_CORES) {
                         if (unlikely(rte_ring_count(nf->rx_q) == 0) && likely(rte_ring_count(nf->msg_q) == 0)) {
                                 rte_atomic16_set(nf->shared_core.sleep_state, 1);
                                 sem_wait(nf->shared_core.nf_mutex);
                         }
                 }
 
-                nb_pkts_added = 0;
-                /* Poll both VFs every iteration, with a full bounded burst per VF. */
-                for (unsigned poll = 0; poll < (direct ? 2u : 1u); poll++) {
-                        uint16_t count = onvm_nflib_dequeue_packets((void **)pkts, nf_local_ctx,
-                                nf->function_table->pkt_handler, onvm_config->dynfield_offset);
-                        if (count > 0)
-                                onvm_pkt_process_tx_batch(nf->nf_tx_mgr, pkts, onvm_config->dynfield_offset, count, nf);
-                        nb_pkts_added += count;
-                }
+                nb_pkts_added =
+                        onvm_nflib_dequeue_packets((void **)pkts, nf_local_ctx, nf->function_table->pkt_handler, onvm_config->dynfield_offset);
 
                 /* TODO: Fix up the segment fault caused by timeout trigger */
                 if (likely(nb_pkts_added > 0)) {
+                        onvm_pkt_process_tx_batch(nf->nf_tx_mgr, pkts, onvm_config->dynfield_offset, nb_pkts_added, nf);
                         init_timeout = 1;
                         last_time_get_pkt = rte_get_tsc_cycles();
                 } else if(nb_pkts_added == 0 && nf->timeout_flag) {
@@ -688,12 +680,6 @@ onvm_nflib_return_pkt_bulk(struct onvm_nf *nf, struct rte_mbuf **pkts, uint16_t 
         unsigned int i;
         if (nf == NULL || pkts == NULL || count == 0)
                 return -1;
-        if (onvm_direct_io_matches(nf)) {
-                int ret = onvm_direct_io_tx(nf, pkts, count);
-                if (ret == 0)
-                        nf->stats.tx_returned += count;
-                return ret;
-        }
         if (unlikely(rte_ring_enqueue_bulk(nf->tx_q, (void **)pkts, count, NULL) == 0)) {
                 nf->stats.tx_drop += count;
                 for (i = 0; i < count; i++) {
@@ -1025,10 +1011,9 @@ onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx, 
         int ret_act;
 
         nf = nf_local_ctx->nf;
-        const int direct = onvm_direct_io_matches(nf);
 
-        nb_pkts = direct ? onvm_direct_io_rx(nf, (struct rte_mbuf **)pkts) :
-            rte_ring_dequeue_burst(nf->rx_q, pkts, PACKET_READ_SIZE, NULL);
+        /* Dequeue all packets in ring up to max possible. */
+        nb_pkts = rte_ring_dequeue_burst(nf->rx_q, pkts, PACKET_READ_SIZE, NULL);
 
         if (unlikely(nb_pkts == 0)) {
                 return 0;
@@ -1048,12 +1033,9 @@ onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx, 
                 }
         }
         if (ONVM_NF_HANDLE_TX) {
-                if (direct) {
-                        /* Buffered/retained mbufs must not be processed or freed by TX. */
-                        memcpy(pkts, tx_buf.buffer, tx_buf.count * sizeof(tx_buf.buffer[0]));
-                        return tx_buf.count;
-                }
-                return nb_pkts;
+                /* Only return mbufs released by the handler; retained packets leave later. */
+                memcpy(pkts, tx_buf.buffer, tx_buf.count * sizeof(tx_buf.buffer[0]));
+                return tx_buf.count;
         }
 
         onvm_pkt_enqueue_tx_thread(&tx_buf, nf);

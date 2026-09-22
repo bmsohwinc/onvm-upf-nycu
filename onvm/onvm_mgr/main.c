@@ -176,7 +176,7 @@ master_thread_main(void) {
 
 /*
  * Function to receive packets from the NIC
- * and distribute them to the default service
+ * and dispatch them by ingress port or the normal service chain
  */
 static int
 rx_thread_main(void *arg) {
@@ -191,8 +191,6 @@ rx_thread_main(void *arg) {
         for (; worker_keep_running;) {
                 /* Read ports */
                 for (i = 0; i < ports->num_ports; i++) {
-                        if (onvm_pkt_is_direct_port(ports->id[i]))
-                                continue;
                         rx_count = rte_eth_rx_burst(ports->id[i], rx_mgr->id, pkts, PACKET_READ_SIZE);
                         ports->rx_stats.rx[ports->id[i]] += rx_count;
 

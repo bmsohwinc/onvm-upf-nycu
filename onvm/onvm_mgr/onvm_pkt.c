@@ -51,14 +51,21 @@
 #include "onvm_nf.h"
 #include "onvm_pkt.h"
 
+/* Temporary port -> UPF-U service map. Match actual DPDK port IDs and worker
+ * YAML: N3 VF0/VF1 = 0/1, N6 VF0/VF1 = 2/3. One NF per worker service.
+ * Zero entries use normal service-chain dispatch. Edit before startup; live
+ * updates from UPF-C and their synchronization will be added separately.
+ */
+uint16_t onvm_port_to_upf_service[RTE_MAX_ETHPORTS] = {
+        [0] = 14, [1] = 15, [2] = 14, [3] = 15,
+};
+
 /**********************************Interfaces*********************************/
 
 void
 onvm_pkt_process_rx_batch(struct queue_mgr *rx_mgr, struct rte_mbuf *pkts[], uint16_t rx_count) {
         uint16_t i;
         struct onvm_pkt_meta *meta;
-	struct rte_ether_hdr *eth_hdr;
-	uint16_t ether_type;
 #ifdef FLOW_LOOKUP
         struct onvm_flow_entry *flow_entry;
         struct onvm_service_chain *sc;
@@ -70,8 +77,15 @@ onvm_pkt_process_rx_batch(struct queue_mgr *rx_mgr, struct rte_mbuf *pkts[], uin
 
         for (i = 0; i < rx_count; i++) {
                 meta = onvm_get_pkt_meta(pkts[i], onvm_config->dynfield_offset);
-                meta->src = 0;
-                meta->chain_index = 0;
+                memset(meta, 0, sizeof(*meta));
+                uint16_t port = pkts[i]->port;
+                uint16_t service = port < RTE_MAX_ETHPORTS ? onvm_port_to_upf_service[port] : 0;
+                if (service != 0) {
+                        meta->action = ONVM_NF_ACTION_TONF;
+                        meta->destination = service;
+                        onvm_pkt_enqueue_nf(rx_mgr, service, pkts[i], NULL);
+                        continue;
+                }
 #ifdef FLOW_LOOKUP
                 ret = onvm_flow_dir_get_pkt(pkts[i], &flow_entry);
                 if (ret >= 0) {

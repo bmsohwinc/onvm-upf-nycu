@@ -1,8 +1,7 @@
 #!/bin/bash
 
 function usage {
-        echo "$0 -k PORTMASK -n NF-COREMASK [-D DIRECT-PORTMASK] [-m MANAGER CORES] [-r NUM-SERVICES] [-d DEFAULT-SERVICE] [-s STATS-OUTPUT] [-p WEB-PORT-NUMBER] [-z STATS-SLEEP-TIME]"
-        echo "  -D reserves a hexadecimal subset of -k for direct NF I/O (default: ONVM_DIRECT_PORT_MASK or 0)"
+        echo "$0 -k PORTMASK -n NF-COREMASK [-m MANAGER CORES] [-r NUM-SERVICES] [-d DEFAULT-SERVICE] [-s STATS-OUTPUT] [-p WEB-PORT-NUMBER] [-z STATS-SLEEP-TIME]"
         # this works well on our 2x6-core nodes
         echo "$0 -k 3 -n 0xF0 --> cores 0,1,2, with ports 0 and 1, with NFs running on cores 4,5,6,7"
         echo -e "\tBy default, cores will be used as follows in numerical order:"
@@ -103,7 +102,6 @@ fi
 SCRIPT=$(readlink -f "$0")
 SCRIPTPATH=$(dirname "$SCRIPT")
 verbosity=1
-direct_ports="${ONVM_DIRECT_PORT_MASK:-0}"
 # Initialize base virtual address to empty.
 virt_addr=""
 
@@ -114,10 +112,9 @@ then
     exit 1
 fi
 
-while getopts "a:r:d:s:t:l:p:z:cvm:k:n:jD:" opt; do
+while getopts "a:r:d:s:t:l:p:z:cvm:k:n:j" opt; do
     case $opt in
         a) virt_addr="--base-virtaddr=$OPTARG";;
-        D) direct_ports="$OPTARG";;
         r) num_srvc="-r $OPTARG";;
         d) def_srvc="-d $OPTARG";;
         s) stats="-s $OPTARG";;
@@ -184,13 +181,6 @@ then
     echo "Error: Invalid port mask. Check input and try again."
     echo ""
     usage
-fi
-
-# Validate the direct mask here; manager checks that it is a subset of enabled ports.
-if [[ ! $direct_ports =~ $port_check ]]
-then
-    echo "Error: Invalid direct port mask. Use a hexadecimal number."
-    exit 1
 fi
 
 # Check for nf_cores flag
@@ -296,7 +286,7 @@ sudo ./build/onvm/onvm_mgr/onvm_mgr \
     -l "$cpu" -n 4 --proc-type=primary \
     "${allow_args[@]}" \
     ${virt_addr} \
-    -- -p ${ports} --direct-port-mask "${direct_ports}" -n ${nf_cores} ${num_srvc} ${def_srvc} ${stats} ${stats_sleep_time} ${verbosity_level} ${ttl} ${packet_limit} ${shared_cpu_flag} ${jumbo_frames_flag}
+    -- -p ${ports} -n ${nf_cores} ${num_srvc} ${def_srvc} ${stats} ${stats_sleep_time} ${verbosity_level} ${ttl} ${packet_limit} ${shared_cpu_flag} ${jumbo_frames_flag}
 
 if [ "${stats}" = "-s web" ]
 then

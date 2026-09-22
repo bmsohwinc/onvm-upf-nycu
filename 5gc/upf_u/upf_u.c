@@ -515,7 +515,7 @@ static bool
 UpfSessionIsLocal(const UpfSession *session, const struct onvm_nf *nf) {
     const UpfWorker *worker = &session->worker;
     if (!worker->service_id) return true;  /* Existing single-UPF-U mode */
-    return g_direct_io && worker->service_id == nf->service_id &&
+    return worker->service_id == nf->service_id &&
            worker->n3_port == g_n3_port && worker->n6_port == g_n6_port &&
            worker->n3_addr.s_addr == g_n3_ip_be;
 }
@@ -1078,14 +1078,6 @@ main(int argc, char *argv[]) {
 
     UTLT_SetLogLevel(g_log_level);
     printf("[UPF-U] Log level: %s\n", g_log_level);
-
-    if (g_direct_io) {
-        int ret = onvm_nflib_enable_direct_io(nf_local_ctx->nf, g_n3_port, g_n6_port);
-        if (ret < 0) {
-            onvm_nflib_stop(nf_local_ctx);
-            rte_exit(EXIT_FAILURE, "Cannot enable UPF-U direct I/O: %s\n", strerror(-ret));
-        }
-    }
 
     if (UpfClsCtrlInit() < 0) {
         rte_exit(EXIT_FAILURE, "CLS_CTRL memzone init failed\n");

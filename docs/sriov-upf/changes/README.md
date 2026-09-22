@@ -5,11 +5,46 @@ baseline `fa54111` through `6b91f82`, and the single companion SMF commit
 `9d572b9` on baseline `7ee2243`. See the [deployment guide](../README.md)
 for commands, configs and the three-node test procedure.
 
-The resulting model has one UPF-C assigning sessions to configured UPF-U
-workers. Each worker directly receives and transmits through its own N3/N6
-VF pair. The manager still initializes the NIC devices, supplies shared
-memory and runs NF lifecycle/control services. Its packet threads skip the
-reserved VFs. Other NFs retain their existing ring transport.
+The current model has one UPF-C assigning sessions to configured UPF-U
+workers. The manager polls all enabled N3/N6 VFs, dispatches packets to each
+worker's RX ring by ingress port ID, and transmits packets from NF TX rings.
+UPF-U uses rings for all packet I/O. The manager map is a simple local variable;
+UPF-C updates will be implemented later.
+
+## Current revision: manager polling and ring transport
+
+This revision supersedes the direct-I/O behavior in commits `8b3df26` and
+`bb36814`. Sections 1–8 below are the historical commit record.
+
+- `onvm_port_to_upf_service` in [onvm_pkt.c](../../../onvm/onvm_mgr/onvm_pkt.c)
+  maps ports 0/2 to service 14 and ports 1/3 to service 15, matching the deployment
+  guide's example port IDs. Edit/rebuild for different IDs. Zero entries use
+  normal service-chain dispatch; clear the defaults for legacy deployments.
+  A mapped service must have exactly one UPF-U. Missing workers follow the
+  existing NF enqueue drop path; mapped packets do not fall back to another NF.
+- Manager RX polls every enabled port. Mapped packets bypass flow/default-chain
+  lookup and retain their ingress port. Manager TX uses the ordinary OUT path.
+  Queue counts follow manager threads; device queue limits are checked, RSS is
+  disabled for one RX queue, and offloads are limited to device capabilities.
+- Remove `onvm_direct_io.c/.h`, the NF enable API/hooks, `dataplane.direct_io`,
+  `-D`/`--direct-port-mask`, `ONVM_DIRECT_PORT_MASK` and its shared memzone.
+  Existing N3/N6 IP/port configuration remains necessary for packet processing.
+- Worker ownership no longer requires direct I/O. UPF-C validates distinct,
+  manager-enabled ports using the existing shared port information. Its worker
+  list must agree with the manager map; no map update protocol is added here.
+- Normal NF TX now excludes mbufs retained by a packet handler, including
+  shaper/session buffering. ARP replies and deferred packets use the existing
+  NF TX ring, avoiding early TX/free and later duplicate submission.
+- The deployment and script guides now use manager polling and ring transport.
+  Session allocation, PFCP/SMF endpoint handling and classifier ACK behavior
+  remain as documented below.
+
+Local verification of this revision: ASan/UBSan passed on extracted packet
+functions with mocked DPDK rings/NIC TX, covering dispatch, service-chain
+fallback, absent/full worker rings, retained mbufs, deferred output and partial
+TX. Flow lookup and NF-side TX handling variants were exercised. Shell syntax
+and diff whitespace checks passed. Full Linux compilation and VF traffic
+remain testbed checks; Meson/DPDK were unavailable locally.
 
 ## Commit map
 
@@ -25,7 +60,7 @@ reserved VFs. Other NFs retain their existing ring transport.
 | Main | `6b91f82` | Add the Intel 82599 deployment guide and portable SMF patch. |
 
 Use `git show <commit>` in the appropriate repository to inspect an exact
-diff. The sections below explain the final behavior; later commits complete
+diff. The historical sections below explain those commits; later commits complete
 the intermediate worker/TEID support introduced by earlier ones.
 
 ## 1. Reserve VF ports in the manager — `8b3df26`
@@ -218,8 +253,8 @@ operation that still needs testing.
 
 ## How the pieces work together
 
-1. Manager initializes/reserves four VF ports and publishes the direct-port
-   mask. Each worker enables direct I/O on its configured pair.
+1. Manager initializes and polls four VF ports. Its local port-to-service map
+   selects the UPF-U RX ring for both ports of each worker.
 2. SMF associates with the single UPF-C, learns FTUP and requests an IPv4 N3
    endpoint using CH during session establishment.
 3. UPF-C selects the next worker, copies ownership into the shared session,
@@ -228,8 +263,9 @@ operation that still needs testing.
    uplink traffic to the assigned N3 IP/TEID. Its own downlink TEID is installed
    by the subsequent PFCP modification.
 5. The preconfigured NIC delivery sends uplink to the worker's N3 VF and
-   return traffic to its N6 VF. That worker polls both and transmits directly
-   through the opposite interface after existing UPF processing.
+   return traffic to its N6 VF. The manager polls both and enqueues packets
+   to that worker's RX ring. After UPF processing, packets leave through the
+   worker's TX ring and the manager transmits on the selected output port.
 6. UPF-C sends session drain events to the owner, but classifier publications
    reach every worker. Reclamation waits for all readers' acknowledgements.
 
@@ -251,6 +287,6 @@ operation that still needs testing.
   two sessions with separate PDRs/FARs/QERs and applied their initial gNB
   modifications. DPDK/runtime pieces were mocked where required.
 - Deployment-guide Bash/config generation and application of the SMF patch
-  were checked. Full Linux compilation, secondary-process VF RX/TX, hardware
+  were checked. Full Linux compilation, manager VF RX/TX, hardware
   steering and three-node traffic/performance remain testbed checks. Temporary
   harness files were not committed; the SMF endpoint tests are in its commit.

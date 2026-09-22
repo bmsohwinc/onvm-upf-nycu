@@ -34,7 +34,6 @@ uint16_t g_sgi_port    = 0;
 
 uint32_t g_n3_ip_be = 0;
 uint32_t g_n6_ip_be = 0;
-uint8_t g_direct_io = 0;
 
 uint8_t g_nat_enabled = 0;
 uint32_t g_an_peer_n3_ip_be = 0;
@@ -146,21 +145,6 @@ do_parse(yaml_document_t *doc) {
     yaml_node_t *dp   = map_get(doc, cfg,  "dataplane");
     if (!dp || dp->type != YAML_MAPPING_NODE)
         return -1;
-
-    // Optional; existing UPF-U configurations continue to use rings.
-    {
-        yaml_node_t *n = map_get(doc, dp, "direct_io");
-        const char *s = scalar_str(n);
-        g_direct_io = 0;
-        if (n) {
-            if (s && (strcmp(s, "true") == 0 || strcmp(s, "1") == 0))
-                g_direct_io = 1;
-            else if (!s || (strcmp(s, "false") != 0 && strcmp(s, "0") != 0)) {
-                fprintf(stderr, "[UPF-U][CONFIG] direct_io must be true or false\n");
-                return -1;
-            }
-        }
-    }
 
     // upf_n3_ip
     {

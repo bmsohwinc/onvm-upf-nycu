@@ -390,9 +390,6 @@ struct ft_request {
 #define PKTMBUF_POOL_NAME "MProc_pktmbuf_pool"
 #define CP_PKTMBUF_POOL_NAME "CP_MProc_pktmbuf_pool"
 #define MZ_PORT_INFO "MProc_port_info"
-/* A uint64_t mask, separate from port_info to preserve existing NF layouts.
- * Set once by manager; each selected port has RX/TX queue 0 for direct I/O. */
-#define MZ_DIRECT_PORT_MASK "MProc_direct_port_mask"
 #define MZ_CORES_STATUS "MProc_cores_info"
 #define MZ_NF_INFO "MProc_nf_init_cfg"
 #define MZ_SERVICES_INFO "MProc_services_info"

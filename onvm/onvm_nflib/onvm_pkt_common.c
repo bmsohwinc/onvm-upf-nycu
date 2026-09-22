@@ -47,9 +47,6 @@
 ******************************************************************************/
 
 #include "onvm_pkt_common.h"
-#include "onvm_direct_io.h"
-
-static uint64_t direct_port_mask;
 
 /**********************Internal Functions Prototypes**************************/
 
@@ -89,16 +86,6 @@ onvm_pkt_drop(struct rte_mbuf *pkt);
 /**********************************Interfaces*********************************/
 
 void
-onvm_pkt_set_direct_port_mask(uint64_t port_mask) {
-        direct_port_mask = port_mask;
-}
-
-int
-onvm_pkt_is_direct_port(uint16_t port) {
-        return port < 64 && (direct_port_mask & (UINT64_C(1) << port)) != 0;
-}
-
-void
 onvm_pkt_process_tx_batch(struct queue_mgr *tx_mgr, struct rte_mbuf *pkts[], int pkt_meta_offset, uint16_t tx_count, struct onvm_nf *nf) {
         uint16_t i;
         struct onvm_pkt_meta *meta;
@@ -106,11 +93,6 @@ onvm_pkt_process_tx_batch(struct queue_mgr *tx_mgr, struct rte_mbuf *pkts[], int
 
         if (tx_mgr == NULL || pkts == NULL || nf == NULL)
                 return;
-
-        if (tx_mgr->mgr_type_t == NF && onvm_direct_io_matches(nf)) {
-                (void)onvm_direct_io_tx(nf, pkts, tx_count);
-                return;
-        }
 
         for (i = 0; i < tx_count; i++) {
                 meta = onvm_get_pkt_meta(pkts[i], pkt_meta_offset);
@@ -241,9 +223,7 @@ onvm_pkt_flush_port_queue(struct queue_mgr *tx_mgr, uint16_t port) {
                 return;
 
         tx_stats = &(ports->tx_stats);
-        /* A stale/misdirected manager buffer must never touch a reserved VF. */
-        sent = onvm_pkt_is_direct_port(port) ? 0 :
-            rte_eth_tx_burst(port, tx_mgr->id, port_buf->buffer, port_buf->count);
+        sent = rte_eth_tx_burst(port, tx_mgr->id, port_buf->buffer, port_buf->count);
         if (unlikely(sent < port_buf->count)) {
                 for (i = sent; i < port_buf->count; i++) {
                         onvm_pkt_drop(port_buf->buffer[i]);
@@ -261,12 +241,6 @@ onvm_pkt_enqueue_tx_thread(struct packet_buf *pkt_buf, struct onvm_nf *nf) {
 
         if (pkt_buf->count == 0)
                 return;
-
-        if (onvm_direct_io_matches(nf)) {
-                (void)onvm_direct_io_tx(nf, pkt_buf->buffer, pkt_buf->count);
-                pkt_buf->count = 0;
-                return;
-        }
 
         if (unlikely(pkt_buf->count > 0 &&
                      rte_ring_enqueue_bulk(nf->tx_q, (void **)pkt_buf->buffer, pkt_buf->count, NULL) == 0)) {
@@ -293,7 +267,7 @@ onvm_pkt_enqueue_port(struct queue_mgr *tx_mgr, uint16_t port, struct rte_mbuf *
                 onvm_pkt_drop(buf);
                 return;
         }
-        if (onvm_pkt_is_direct_port(port) || !ports->init[port]) {
+        if (!ports->init[port]) {
                 onvm_pkt_drop(buf);
                 ports->tx_stats.tx_drop[port]++;
                 return;

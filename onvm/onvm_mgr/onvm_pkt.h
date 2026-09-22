@@ -53,6 +53,11 @@
 
 /*********************************Interfaces**********************************/
 
+/* Port -> UPF-U service ID; zero selects the normal service chain.
+ * Manager-local placeholder; configure before packet threads start.
+ */
+extern uint16_t onvm_port_to_upf_service[RTE_MAX_ETHPORTS];
+
 /*
  * Interface to process packets in a given RX queue.
  *

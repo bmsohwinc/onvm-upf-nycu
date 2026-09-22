@@ -14,10 +14,11 @@ not require a programmable SmartNIC. What matters is access to two suitable
 PFs, their VF configuration and working IOMMU groups. The guide targets bare
 metal nodes with those capabilities. [DPDK Intel VF support](https://doc.dpdk.org/guides-24.07/nics/intel_vf.html)
 
-Each worker directly polls queue 0 of one N3 VF and one N6 VF. The manager
-initializes all four VFs but skips their packet RX/TX. UPF-C assigns sessions
-in worker-list order and returns that worker's static N3 IP and uplink TEID.
-Control NFs continue using their existing ONVM transport.
+The manager initializes and polls all four VFs, forwarding ingress packets
+to each UPF-U's RX ring using a static port-ID-to-service-ID array. UPF-U returns
+output through its TX ring; the manager transmits it on the selected port.
+UPF-C assigns sessions in worker-list order and returns that worker's static
+N3 IP and uplink TEID. Updating the manager map from UPF-C is deferred.
 
 | Session | Worker service | N3 VF | N6 VF | N3 IP (example) | UL TEID |
 | --- | --- | --- | --- | --- | --- |
@@ -60,15 +61,16 @@ Intel NIC may need another PF driver and different filter commands.
 
 Use two 10-Gbit/s experiment links. On node2, the first PF carries kernel N2
 traffic to its PF MAC and N3 traffic to its two VF MACs. Its PF remains under
-`ixgbe`, so AMF can use it while UPF-U polls the VFs. The second PF supplies
+`ixgbe`, so AMF can use it while the manager polls the VFs. The second PF supplies
 the two N6 VFs. This preserves the three logical IP subnets using two physical
 ports; N2 does not need a third data NIC.
 
 ```mermaid
 flowchart LR
     R["node1: UE + gNB"] <-->|"10G L2: N2 + N3"| A["node2 PF A: kernel N2 + two N3 VFs"]
-    A --- U["UPF-U1 and UPF-U2: one VF pair each"]
-    U --- B["node2 PF B: two N6 VFs"]
+    A --- M["ONVM manager: VF RX/TX + port map"]
+    M <-->|"RX/TX rings"| U["UPF-U1 and UPF-U2"]
+    M --- B["node2 PF B: two N6 VFs"]
     B <-->|"10G L2: N6"| D["node3: DN"]
 ```
 
@@ -514,20 +516,19 @@ sudo sysctl -w kernel.randomize_va_space=0
 
 source "$HOME/upf-sriov-demo/env.sh"
 cd "$UPF_REPO"
-./scripts/start.sh -k f -D f -n 0xFFF8 -r 32 -s stdout
+./scripts/start.sh -k f -n 0xFFF8 -r 32 -s stdout
 ```
 
 `ONVM_ALLOW_LIST` now contains the **four VF BDFs**, not the original two PFs.
-`-k f` initializes DPDK ports 0–3; `-D f` reserves all four for direct I/O.
-If using your external manager wrapper, pass `-k f -a "$ONVM_ALLOW_LIST"`
-and export `ONVM_DIRECT_PORT_MASK=f` before invoking it.
+`-k f` enables manager RX/TX on DPDK ports 0–3. No reservation mask is used.
+If using your external manager wrapper, pass `-k f -a "$ONVM_ALLOW_LIST"`.
 
 Stop all previous ONVM processes first: `start.sh` removes old `rtemap_*`
 hugepage files. Keep manager/NFs in the same DPDK shared-memory namespace
 (default file prefix `rte`). Do not change PF queues, ntuple settings or VF
 configuration while the manager/workers run.
 
-Record each startup line `Port N (PCI_BDF): direct NF I/O`, along with
+Record each startup line `Port N (PCI_BDF): manager I/O`, along with
 `Rx rings 1` and `Tx rings 1`. **Allowlist order does not establish port ID
 order.** In another node2 terminal, substitute the IDs from those lines:
 
@@ -542,6 +543,14 @@ export N6_PORT2=3
 EOF
 source "$DEMO_DIR/env.sh"
 ```
+
+The temporary `onvm_port_to_upf_service` array in
+[`onvm_pkt.c`](../../onvm/onvm_mgr/onvm_pkt.c) defaults to ports 0/2 → service 14
+and ports 1/3 → service 15. If the IDs above differ, edit the array and rebuild
+and restart the manager before starting NFs. The map is manager-local; UPF-C
+does not populate it yet. Zero entries use normal service-chain dispatch.
+Keep the default three manager cores for one RX/TX queue per VF; additional
+manager threads require enough hardware queues on every enabled device.
 
 ## 6. Write the worker and UPF-C configs
 
@@ -561,7 +570,6 @@ info:
 configuration:
   log_level: info
   dataplane:
-    direct_io: true
     upf_n3_ip: "$n3_ip"
     upf_n6_ip: "$n6_ip"
     ports: {n3_port: $n3_port, n6_port: $n6_port}
@@ -639,7 +647,7 @@ sudo ./build/5gc/l25gc_upf_u -l 14 -n 4 --proc-type=secondary \
 UPF-U takes a **positional YAML path**; UPF-C uses `-f`. ONVM `-m` is a
 manual-core flag selecting the EAL `-l` core, not a mask. The direct binary
 commands avoid the external wrappers' `awk -F "--"` parsing of `--allow`.
-Each worker must report its intended N3/N6 ports and `RX/TX queue 0`.
+Check each worker's N3/N6 config against the manager port-to-service map.
 The two workers must use the same DPDK allowlist as the manager.
 
 Start the remaining control NFs using the working L25GC scripts/environment,
@@ -716,9 +724,8 @@ Expected packets:
 The downlink TEID need not equal `0x1001`/`0x1002`. UPF-C returns the static
 TEID for uplink; the gNB chooses its downlink receive TEID.
 
-ONVM's port counters include direct worker RX/TX, so increasing manager
-statistics do not imply its threads carried these packets. Check the startup
-reservation/worker logs, packet MAC/IP/TEID values and per-worker counters.
+ONVM's port counters now count manager RX/TX. Check the startup port mapping,
+manager port-to-service array, packet MAC/IP/TEID values and per-worker counters.
 With only UE1 sending, sustained data traffic should increment worker 14;
 worker 15 can still receive broadcast ARP. Repeat with only UE2 sending.
 Start with small packets (for example 64-byte UDP payloads); leave room for
@@ -804,7 +811,7 @@ ping/iperf test verifies connectivity; it does not establish UPF capacity.
 | --- | --- |
 | No VF IOMMU group or VF bind fails | Bare metal allocation, SR-IOV/VT-d support and active IOMMU boot settings. |
 | VF initialization or secondary attach fails | PFs still on `ixgbe` and up; same DPDK build, allowlist, hugepage mount and namespace; no old manager. |
-| Direct-I/O startup rejects a port | Actual BDF-to-port mapping, manager `-k f -D f`, exactly one RX/TX queue per VF. |
+| Worker gets no ingress from its VF | Actual BDF-to-port mapping, manager `-k f`, port-to-service array, and a running NF at that service. |
 | NIC rule rejected | Installed ixgbe/ethtool support, occupied filter locations, matching mask conflicts and valid VF index. Inspect `ethtool -n`. |
 | N3 packets arrive at PF but worker gets no traffic | Destination VF MAC/last-hop neighbor mapping, VF VLAN and matching destination N3 IP; IP filters cannot override L2 routing. |
 | Worker receives packets but no data exits | ARP for the real gNB/DN address, worker config/ownership match, classifier installation and packet size. Node2 kernel routes do not supply the UPF gateway. |
@@ -851,7 +858,14 @@ sudo ip rule del priority 10002 from 10.60.0.2/32 to 192.168.3.2/32 table 1002
 
 ## Verification boundary
 
-Local checks covered direct-I/O dispatch, worker ownership, YAML rejection
+The manager/ring revision passed local ASan/UBSan checks using extracted packet
+functions with mocked DPDK rings/NIC TX: port dispatch, service-chain fallback,
+missing/full worker rings, retained mbufs, deferred output and partial TX.
+Checks ran with and without flow lookup and with NF-side TX handling disabled.
+`bash -n scripts/start.sh` and `git diff --check` also passed. Meson/DPDK were
+unavailable locally, so these checks do not establish a successful Linux build.
+
+Earlier local checks covered worker ownership, YAML rejection
 cases, PFCP retry/allocation, C↔Go PFCP encoding and SMF N2 endpoint encoding.
 A focused ASan/UBSan regression installed two sessions with separate UL/DL
 PDRs, FARs and default/AMBR QERs, then applied their initial gNB modifications.

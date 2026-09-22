@@ -3,44 +3,37 @@
 This directory contains various scripts to run and configure different
 portions of openNetVM
 
-## Ports reserved for direct NF I/O
+## Manager VF I/O and UPF-U rings
 
-`start.sh -D DIRECT_PORTMASK` reserves ports for direct NF RX/TX. The manager
-initializes one RX queue and one TX queue (both queue 0) on each reserved port,
-but does not receive or transmit packets on it. Other ports keep the existing
-manager/ring path. The default mask is `0`.
+The manager polls all enabled ports and transmits packets returned through NF
+TX rings. UPF-U uses its normal RX/TX rings, including ARP and deferred output.
+There is no direct-I/O option or port reservation mask.
 
-The direct mask must be a subset of `-k PORTMASK`. For four VF devices assigned
-DPDK port IDs 0–3:
+The temporary `onvm_port_to_upf_service` array in
+[`onvm_pkt.c`](../onvm/onvm_mgr/onvm_pkt.c) maps ingress DPDK port IDs to worker
+service IDs: ports **0/2 → 14**, **1/3 → 15**. This assumes N3 VFs are ports 0/1
+and N6 VFs are ports 2/3. Check the manager's BDF-to-port startup log, edit the
+array to match the actual ports/services, then rebuild/restart the manager.
+Zero entries retain normal service-chain dispatch; clear the four defaults
+for a legacy deployment. Run exactly one UPF-U per mapped service. Packets
+for an absent worker are dropped by normal NF enqueue handling.
+UPF-C does not update this manager-local map yet.
 
 ```bash
-ONVM_ALLOW_LIST="<N3_VF1_PCI> <N6_VF1_PCI> <N3_VF2_PCI> <N6_VF2_PCI>" \
-    ./scripts/start.sh -k f -D f -n 0xFFF8 -s stdout
+ONVM_ALLOW_LIST="<N3_VF0_PCI> <N3_VF1_PCI> <N6_VF0_PCI> <N6_VF1_PCI>" \
+    ./scripts/start.sh -k f -n 0xFFF8 -r 32 -s stdout
 ```
 
-Check the manager startup log for the actual device-to-port-ID mapping. Each
-reserved port must have exactly one direct-I/O NF polling/transmitting queue 0;
-a ring-based NF cannot use these ports through the manager.
+Each port gets one RX queue per manager RX thread and one TX queue per manager
+TX thread. The default three manager cores use one RX and one TX queue per
+port. The manager rejects queue counts above a device's capabilities.
 
-`ONVM_DIRECT_PORT_MASK=f` also supplies the mask, allowing an existing wrapper
-script to enable it without adding a `-D` argument. An explicit `-D` overrides
-the environment variable. The manager publishes the immutable `uint64_t` mask
-in `MProc_direct_port_mask` for direct-I/O NFs to check at startup.
-
-## UPF-U direct VF I/O
-
-Set `configuration.dataplane.direct_io: true` in the UPF-U YAML. The existing
-`ports.n3_port` and `ports.n6_port` select its two reserved VF ports; both use
-RX/TX queue 0. Use a separate config per worker, with disjoint port pairs and
-the corresponding N3/N6 IPs. The default `false` keeps the existing ring path.
-
-The manager and both secondary UPF-U processes must receive the same PCI
-allowlist. The YAML selects which two ports each worker actually polls.
-For example, after starting the manager with the four-VF allowlist:
+Keep the existing per-worker N3/N6 IP and port settings for packet processing,
+ARP and session ownership. Manager and secondary NFs use the same PCI allowlist
+and DPDK namespace so their port IDs and shared memory agree.
 
 ```bash
-# Use the same device list as manager, in each worker's shell.
-export ONVM_ALLOW_LIST="<N3_VF1_PCI> <N6_VF1_PCI> <N3_VF2_PCI> <N6_VF2_PCI>"
+export ONVM_ALLOW_LIST="<N3_VF0_PCI> <N3_VF1_PCI> <N6_VF0_PCI> <N6_VF1_PCI>"
 allow_args=()
 for dev in $ONVM_ALLOW_LIST; do
     allow_args+=(--allow "$dev")
@@ -51,16 +44,9 @@ sudo ./build/5gc/l25gc_upf_u -l 3 -n 4 --proc-type=secondary \
     "${allow_args[@]}" -- -r 14 -m -- /path/to/upf_u_1.yaml
 ```
 
-`-m` is the ONVM manual-core flag: it uses the EAL core specified by `-l`.
-Choose distinct, manager-enabled NF cores and unused service IDs. Existing
-wrappers that split arguments on the substring `--` cannot safely forward
-`--allow`; the direct binary invocation above avoids that parsing issue.
-
-One bounded burst is read from each VF per event-loop iteration. Normal TX,
-ARP replies, and shaper/session-buffer drains transmit on the assigned VF;
-partial TX bursts free unsent packets. NF control messages still use ONVM
-message queues. Each VF must have only one worker using its queues, and its
-PMD must support RX/TX in a DPDK secondary process.
+`-m` selects the EAL core specified by `-l`. Choose distinct, manager-enabled
+NF cores and unused service IDs. Invoke the binary as above when wrappers
+cannot safely forward `--allow`.
 
 ## UPF-C worker ownership
 
@@ -69,13 +55,14 @@ VF port IDs and worker N3 addresses:
 
 ```yaml
 upf_u_workers:
-  - {service_id: 14, n3_ip: 192.0.2.11, ul_teid: 0x1001, n3_port: 0, n6_port: 1}
-  - {service_id: 15, n3_ip: 192.0.2.12, ul_teid: 0x1002, n3_port: 2, n6_port: 3}
+  - {service_id: 14, n3_ip: 192.0.2.11, ul_teid: 0x1001, n3_port: 0, n6_port: 2}
+  - {service_id: 15, n3_ip: 192.0.2.12, ul_teid: 0x1002, n3_port: 1, n6_port: 3}
 ```
 
 Run UPF-C as service 2, and exactly one UPF-U per listed service. Each worker's
-`direct_io`, N3 IP and port pair must match its UPF-U YAML. All listed VF ports
-must be reserved by the manager. Start both workers before connecting the UEs.
+N3 IP and port pair must match its UPF-U YAML, and the service/port mapping
+must match the manager array. All listed VF ports must be enabled by the
+manager. Start both workers before connecting the UEs.
 
 The first new session takes the first worker; the second takes the second.
 UPF-C copies ownership into the shared session and uses that worker's ports
@@ -88,7 +75,8 @@ PFCP retransmissions replay the cached response before session allocation.
 Duplicate UE IPs/TEIDs cannot replace existing mappings, and a new session
 cannot consume a worker beyond the configured list. Assignments are not reused;
 restart all NFs between demo runs. Omitting the list preserves the existing
-single-UPF-U configuration and service 1 notifications.
+single-UPF-U configuration and service 1 notifications; also clear the
+manager map to restore service-chain ingress.
 
 `ul_teid` is required for each worker and accepts decimal or `0x` hexadecimal
 values in 1–4294967295. TEIDs must be distinct across workers because the shared

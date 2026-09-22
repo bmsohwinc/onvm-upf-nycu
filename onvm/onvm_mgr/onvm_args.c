@@ -49,7 +49,6 @@
 
 #include "onvm_mgr/onvm_args.h"
 #include "onvm_mgr/onvm_stats.h"
-#include <ctype.h>
 
 /******************************Global variables*******************************/
 
@@ -83,9 +82,6 @@ uint8_t ONVM_NF_SHARE_CORES = 0;
 /* global flag for jumbo frames - extern in init.h */
 uint8_t ONVM_USE_JUMBO_FRAMES = 0;
 
-/* Ports initialized by manager but polled/transmitted by direct-I/O NFs. */
-uint64_t onvm_direct_port_mask = 0;
-
 /* global var for program name */
 static const char *progname;
 
@@ -96,9 +92,6 @@ usage(void);
 
 static int
 parse_portmask(uint8_t max_ports, const char *portmask);
-
-static int
-parse_direct_portmask(const char *portmask);
 
 static int
 parse_default_service(const char *services);
@@ -138,22 +131,15 @@ parse_app_args(uint8_t max_ports, int argc, char *argv[]) {
             {"time_to_live", no_argument, NULL, 't'},    {"packet_limit", no_argument, NULL, 'l'},
             {"verbocity-level", no_argument, NULL, 'v'}, {"enable_shared_cpu", no_argument, NULL, 'c'},
             {"jumbo_frames", no_argument, NULL, 'j'},
-            {"direct-port-mask", required_argument, NULL, 'D'},
             {NULL, 0, NULL, 0}};
 
         progname = argv[0];
 
-        while ((opt = getopt_long(argc, argvopt, "p:r:n:d:s:t:l:z:v:cjD:", lgopts, &option_index)) != EOF) {
+        while ((opt = getopt_long(argc, argvopt, "p:r:n:d:s:t:l:z:v:cj", lgopts, &option_index)) != EOF) {
                 switch (opt) {
                         case 'p':
                                 if (parse_portmask(max_ports, optarg) != 0) {
                                         usage();
-                                        return -1;
-                                }
-                                break;
-                        case 'D':
-                                if (parse_direct_portmask(optarg) != 0) {
-                                        printf("ERROR: Invalid direct port mask '%s'\n", optarg);
                                         return -1;
                                 }
                                 break;
@@ -221,17 +207,6 @@ parse_app_args(uint8_t max_ports, int argc, char *argv[]) {
                 }
         }
 
-        /* Validate after parsing so -D and -p may appear in either order. */
-        uint64_t enabled_port_mask = 0;
-        for (uint16_t i = 0; i < ports->num_ports; i++) {
-                if (ports->id[i] < 64)
-                        enabled_port_mask |= UINT64_C(1) << ports->id[i];
-        }
-        if (onvm_direct_port_mask & ~enabled_port_mask) {
-                printf("ERROR: Direct ports must be included in -p and present on this manager\n");
-                return -1;
-        }
-
         return 0;
 }
 
@@ -242,7 +217,6 @@ usage(void) {
         printf(
             "%s [EAL options] -- -p PORTMASK [-r NUM_SERVICES] [-d DEFAULT_SERVICE] [-s STATS_OUTPUT]\n"
             "\t-p PORTMASK: hexadecimal bitmask of ports to use\n"
-            "\t-D DIRECT_PORTMASK: hexadecimal subset of -p reserved for direct NF I/O (default 0)\n"
             "\t-r NUM_SERVICES: number of unique serivces allowed. defaults to 16 (optional)\n"
             "\t-d DEFAULT_SERVICE: the service to initially receive packets. defaults to 1 (optional)\n"
             "\t-s STATS_OUTPUT: where to output manager stats (stdout/stderr/web). defaults to NONE (optional)\n"
@@ -253,21 +227,6 @@ usage(void) {
             "\t-c ENABLE_SHARED_CORE: allow the NFs to share a core based on mutex sleep/wakeups (optional)\n"
             "\t-j JUMBO_FRAMES: allow the ports to send and receive jumbo frames (optional)\n",
             progname);
-}
-
-static int
-parse_direct_portmask(const char *portmask) {
-        char *end;
-        unsigned long long mask;
-
-        if (portmask == NULL || !isxdigit((unsigned char)portmask[0]))
-                return -1;
-        errno = 0;
-        mask = strtoull(portmask, &end, 16);
-        if (errno == ERANGE || *end != '\0')
-                return -1;
-        onvm_direct_port_mask = (uint64_t)mask;
-        return 0;
 }
 
 static int

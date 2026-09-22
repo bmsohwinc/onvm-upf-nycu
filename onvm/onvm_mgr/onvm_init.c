@@ -48,7 +48,7 @@
 ******************************************************************************/
 
 #include "onvm_mgr/onvm_init.h"
-#include "onvm_pkt_common.h"
+#include "onvm_pkt.h"
 
 #include "upf/upf_context.h"
 
@@ -139,7 +139,6 @@ init(int argc, char *argv[]) {
         int retval;
         const struct rte_memzone *mz_nf;
         const struct rte_memzone *mz_port;
-        const struct rte_memzone *mz_direct_ports;
         const struct rte_memzone *mz_cores;
         const struct rte_memzone *mz_scp;
         const struct rte_memzone *mz_services;
@@ -212,12 +211,6 @@ init(int argc, char *argv[]) {
         if (retval != 0)
                 return -1;
 
-        mz_direct_ports = rte_memzone_reserve(MZ_DIRECT_PORT_MASK, sizeof(uint64_t), rte_socket_id(), NO_FLAGS);
-        if (mz_direct_ports == NULL)
-                rte_exit(EXIT_FAILURE, "Cannot reserve memory zone for direct port mask\n");
-        *(uint64_t *)mz_direct_ports->addr = onvm_direct_port_mask;
-        onvm_pkt_set_direct_port_mask(onvm_direct_port_mask);
-
         /* register onvm_pkt_meta dynfield with DPDK (must be done before init_mbuf_pools) */
         static const struct rte_mbuf_dynfield onvm_pkt_meta_dynfield_desc = {
                 .name = "onvm_pkt_meta_dynfield",
@@ -250,6 +243,12 @@ init(int argc, char *argv[]) {
         /* now initialise the ports we will use */
         for (i = 0; i < ports->num_ports; i++) {
                 port_id = ports->id[i];
+                uint16_t service = onvm_port_to_upf_service[port_id];
+                if (service >= num_services)
+                        rte_exit(EXIT_FAILURE, "Port %u maps to service %u outside manager service range [0, %u)\n",
+                                 port_id, service, num_services);
+                if (service != 0)
+                        printf("Port %u ingress -> UPF-U service %u RX ring\n", port_id, service);
                 rte_eth_macaddr_get(port_id, &ports->mac[port_id]);
                 retval = init_port(port_id);
                 if (retval != 0)
@@ -370,11 +369,10 @@ init_nf_init_cfg_pool(void) {
  */
 static int
 init_port(uint8_t port_num) {
-        const int direct = onvm_pkt_is_direct_port(port_num);
-        const uint16_t rx_rings = direct ? 1 : ONVM_NUM_RX_THREADS;
+        const uint16_t rx_rings = ONVM_NUM_RX_THREADS;
         uint16_t rx_ring_size = RTE_MP_RX_DESC_DEFAULT;
         /* Set the number of tx_rings equal to the tx threads. This mimics the onvm_mgr tx thread calculation. */
-        const uint16_t tx_rings = direct ? 1 : rte_lcore_count() - rx_rings - ONVM_NUM_MGR_AUX_THREADS;
+        const uint16_t tx_rings = rte_lcore_count() - rx_rings - ONVM_NUM_MGR_AUX_THREADS;
         uint16_t tx_ring_size = RTE_MP_TX_DESC_DEFAULT;
 
         struct rte_eth_rxconf rxq_conf;
@@ -389,7 +387,7 @@ init_port(uint8_t port_num) {
         retval = rte_eth_dev_get_name_by_port(port_num, dev_name);
         if (retval != 0)
                 return retval;
-        printf("Port %u (%s): %s I/O\n", port_num, dev_name, direct ? "direct NF" : "manager");
+        printf("Port %u (%s): manager I/O\n", port_num, dev_name);
         printf("Port %u socket id %u ... \n", (unsigned)port_num, (unsigned)rte_eth_dev_socket_id(port_num));
         printf("Port %u Rx rings %u ... \n", (unsigned)port_num, (unsigned)rx_rings);
         printf("Port %u Tx rings %u ... \n", (unsigned)port_num, (unsigned)tx_rings);
@@ -400,22 +398,21 @@ init_port(uint8_t port_num) {
         retval = rte_eth_dev_info_get(port_num, &dev_info);
         if (retval != 0)
                 return retval;
-        if (direct) {
-                /* NIC flow rules select the VF; its only RX queue needs no RSS. */
+        if (rx_rings > dev_info.max_rx_queues || tx_rings > dev_info.max_tx_queues) {
+                fprintf(stderr, "Port %u supports at most %u RX/%u TX queues; manager requests %u/%u\n",
+                        port_num, dev_info.max_rx_queues, dev_info.max_tx_queues, rx_rings, tx_rings);
+                return -EINVAL;
+        }
+        /* VFs may support fewer offloads than their PF. */
+        local_port_conf.rxmode.offloads &= dev_info.rx_offload_capa;
+        local_port_conf.txmode.offloads &= dev_info.tx_offload_capa;
+        if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
+                local_port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
+        local_port_conf.rx_adv_conf.rss_conf.rss_hf &= dev_info.flow_type_rss_offloads;
+        if (rx_rings == 1 || local_port_conf.rx_adv_conf.rss_conf.rss_hf == 0) {
                 local_port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_NONE;
                 memset(&local_port_conf.rx_adv_conf.rss_conf, 0, sizeof(local_port_conf.rx_adv_conf.rss_conf));
-                local_port_conf.rxmode.offloads &= dev_info.rx_offload_capa;
-                local_port_conf.txmode.offloads &= dev_info.tx_offload_capa;
         } else {
-                if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
-                        local_port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
-                local_port_conf.rx_adv_conf.rss_conf.rss_hf &= dev_info.flow_type_rss_offloads;
-                if (local_port_conf.rx_adv_conf.rss_conf.rss_hf != port_conf.rx_adv_conf.rss_conf.rss_hf) {
-                        printf(
-                            "Port %u modified RSS hash function based on hardware support,"
-                            "requested:%#" PRIx64 " configured:%#" PRIx64 "\n",
-                            port_num, port_conf.rx_adv_conf.rss_conf.rss_hf, local_port_conf.rx_adv_conf.rss_conf.rss_hf);
-                }
                 local_port_conf.rx_adv_conf.rss_conf.rss_key_len = dev_info.hash_key_size;
         }
 
@@ -443,7 +440,7 @@ init_port(uint8_t port_num) {
         }
 
         txq_conf = dev_info.default_txconf;
-        txq_conf.offloads = direct ? local_port_conf.txmode.offloads : port_conf.txmode.offloads;
+        txq_conf.offloads = local_port_conf.txmode.offloads;
         for (q = 0; q < tx_rings; q++) {
                 retval = rte_eth_tx_queue_setup(port_num, q, tx_ring_size, rte_eth_dev_socket_id(port_num), &txq_conf);
                 if (retval < 0)

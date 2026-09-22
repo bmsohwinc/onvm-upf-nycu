@@ -56,10 +56,10 @@ static Status ParseWorkers(YamlIter *config) {
     YamlIterChild(config, &workers);
     UTLT_Assert(YamlIterType(&workers) == YAML_SEQUENCE_NODE && !Self()->workerCount,
                 return STATUS_ERROR, "upf_u_workers must be one nonempty list");
-    const struct rte_memzone *mz = rte_memzone_lookup(MZ_DIRECT_PORT_MASK);
-    UTLT_Assert(mz && mz->len >= sizeof(uint64_t), return STATUS_ERROR,
-                "Worker VFs require a manager with direct ports reserved by -D");
-    uint64_t direct_mask = *(const uint64_t *)mz->addr;
+    const struct rte_memzone *mz = rte_memzone_lookup(MZ_PORT_INFO);
+    UTLT_Assert(mz && mz->len >= sizeof(struct port_info), return STATUS_ERROR,
+                "Worker VFs require manager port information");
+    const struct port_info *manager_ports = mz->addr;
 
     while (YamlIterNext(&workers)) {
         UTLT_Assert(Self()->workerCount < UPF_MAX_WORKERS, return STATUS_ERROR,
@@ -81,7 +81,7 @@ static Status ParseWorkers(YamlIter *config) {
                             &worker.service_id) == STATUS_OK, return STATUS_ERROR, "Invalid service_id");
             } else if (!strcmp(key, "n3_port") || !strcmp(key, "n6_port")) {
                 field = !strcmp(key, "n3_port") ? 2 : 4;
-                UTLT_Assert(ParseWorkerPortOrService(value, RTE_MIN(RTE_MAX_ETHPORTS, 64) - 1,
+                UTLT_Assert(ParseWorkerPortOrService(value, RTE_MAX_ETHPORTS - 1,
                             field == 2 ? &worker.n3_port : &worker.n6_port) == STATUS_OK,
                             return STATUS_ERROR, "Invalid VF port");
             } else if (!strcmp(key, "n3_ip")) {
@@ -109,9 +109,8 @@ static Status ParseWorkers(YamlIter *config) {
         UTLT_Assert(fields == 31 && worker.service_id && worker.service_id != UPF_C_SERVICE_ID,
                     return STATUS_ERROR, "Worker requires service_id, n3_port, n6_port, n3_ip and ul_teid; service 2 is UPF-C");
         UTLT_Assert(worker.n3_port != worker.n6_port &&
-                    (direct_mask & (UINT64_C(1) << worker.n3_port)) &&
-                    (direct_mask & (UINT64_C(1) << worker.n6_port)), return STATUS_ERROR,
-                    "Worker requires two distinct, manager-reserved VF ports");
+                    manager_ports->init[worker.n3_port] && manager_ports->init[worker.n6_port],
+                    return STATUS_ERROR, "Worker requires two distinct, manager-enabled VF ports");
         for (uint16_t i = 0; i < Self()->workerCount; i++) {
             const UpfWorker *other = &Self()->workers[i];
             UTLT_Assert(worker.service_id != other->service_id &&
