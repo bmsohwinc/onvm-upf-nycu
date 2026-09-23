@@ -177,16 +177,21 @@ onvm_pkt_flush_nf_queue(struct queue_mgr *tx_mgr, uint16_t nf_id, struct onvm_nf
 void
 onvm_pkt_enqueue_nf(struct queue_mgr *tx_mgr, uint16_t dst_service_id, struct rte_mbuf *pkt,
                     struct onvm_nf *source_nf) {
+        if (tx_mgr == NULL || pkt == NULL)
+                return;
+        onvm_pkt_enqueue_nf_instance(tx_mgr, onvm_sc_service_to_nf_map(dst_service_id, pkt), pkt, source_nf);
+}
+
+void
+onvm_pkt_enqueue_nf_instance(struct queue_mgr *tx_mgr, uint16_t dst_instance_id, struct rte_mbuf *pkt,
+                             struct onvm_nf *source_nf) {
         struct onvm_nf *nf;
-        uint16_t dst_instance_id;
         struct packet_buf *nf_buf;
 
         if (tx_mgr == NULL || pkt == NULL)
                 return;
 
-        // map service to instance and check one exists
-        dst_instance_id = onvm_sc_service_to_nf_map(dst_service_id, pkt);
-        if (dst_instance_id == 0) {
+        if (dst_instance_id == 0 || dst_instance_id >= MAX_NFS) {
                 onvm_pkt_drop(pkt);
                 if (source_nf != NULL)
                         source_nf->stats.tx_drop++;

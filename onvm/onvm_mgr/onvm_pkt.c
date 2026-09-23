@@ -50,11 +50,12 @@
 
 #include "onvm_nf.h"
 #include "onvm_pkt.h"
+#include "onvm_upf.h"
 
 /* Temporary port -> UPF-U service map. Match actual DPDK port IDs and worker
  * YAML: N3 VF0/VF1 = 0/1, N6 VF0/VF1 = 2/3. One NF per worker service.
- * Zero entries use normal service-chain dispatch. Edit before startup; live
- * updates from UPF-C and their synchronization will be added separately.
+ * Zero entries use normal service-chain dispatch. Used only until UPF-C
+ * publishes a dynamic slot configuration; that mode replaces this entire map.
  */
 uint16_t onvm_port_to_upf_service[RTE_MAX_ETHPORTS] = {
         [0] = 14, [1] = 15, [2] = 14, [3] = 15,
@@ -79,8 +80,26 @@ onvm_pkt_process_rx_batch(struct queue_mgr *rx_mgr, struct rte_mbuf *pkts[], uin
                 meta = onvm_get_pkt_meta(pkts[i], onvm_config->dynfield_offset);
                 memset(meta, 0, sizeof(*meta));
                 uint16_t port = pkts[i]->port;
-                uint16_t service = port < RTE_MAX_ETHPORTS ? onvm_port_to_upf_service[port] : 0;
+                if (onvm_upf_is_dynamic()) {
+                        int instance = onvm_upf_port_destination(port);
+                        if (instance < 0) {
+                                rte_pktmbuf_free(pkts[i]);
+                                continue;
+                        }
+                        if (instance > 0) {
+                                meta->action = ONVM_NF_ACTION_TONF;
+                                meta->destination = nfs[instance].service_id;
+                                onvm_pkt_enqueue_nf_instance(rx_mgr, instance, pkts[i], NULL);
+                                continue;
+                        }
+                }
+                uint16_t service = !onvm_upf_is_dynamic() && port < RTE_MAX_ETHPORTS
+                                     ? onvm_port_to_upf_service[port] : 0;
                 if (service != 0) {
+                        if (service >= num_services) {
+                                rte_pktmbuf_free(pkts[i]);
+                                continue;
+                        }
                         meta->action = ONVM_NF_ACTION_TONF;
                         meta->destination = service;
                         onvm_pkt_enqueue_nf(rx_mgr, service, pkts[i], NULL);

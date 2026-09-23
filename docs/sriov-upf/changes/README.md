@@ -8,16 +8,19 @@ for commands, configs and the three-node test procedure.
 The current model has one UPF-C assigning sessions to configured UPF-U
 workers. The manager polls all enabled N3/N6 VFs, dispatches packets to each
 worker's RX ring by ingress port ID, and transmits packets from NF TX rings.
-UPF-U uses rings for all packet I/O. The manager map is a simple local variable;
-UPF-C updates will be implemented later.
+UPF-U uses rings for all packet I/O. Static mode uses a manager-local service
+map; dynamic mode uses the configured slot pool and acknowledged poll updates.
 
 Dynamic scale-out is being implemented in reviewed phases. The
-[phase 1 configuration/registry change](../dynamic-scaling.md) adds an opt-in
-worker-slot configuration with INACTIVE shared state. Dynamic admission,
-spawning, manager activation and NIC/DN steering are subsequent phases; the
-existing static packet path below remains in use.
+[configuration/registry and manager activation phases](../dynamic-scaling.md)
+add an opt-in worker-slot configuration with INACTIVE shared state, a
+nonblocking request/ACK API, and exact-instance dispatch. Manager skips each
+inactive slot's VF pair and acknowledges activation of both ports at an RX
+boundary. UPF-C admission/spawning and NIC/DN steering remain subsequent
+phases; dynamic-mode establishments still return NO_RESOURCES_AVAILABLE.
+See [polling validation](../../../tests/worker_polling/README.md) for local checks.
 
-## Current revision: manager polling and ring transport
+## Static packet path: manager polling and ring transport
 
 This revision supersedes the direct-I/O behavior in commits `8b3df26` and
 `bb36814`. Sections 1–8 below are the historical commit record.

@@ -106,6 +106,11 @@ onvm_pkt_flush_nf_queue(struct queue_mgr *tx_mgr, uint16_t nf_id, struct onvm_nf
 void
 onvm_pkt_enqueue_nf(struct queue_mgr *tx_mgr, uint16_t dst_service_id, struct rte_mbuf *pkt, struct onvm_nf *source_nf);
 
+/* Same buffering/drop path, for an explicitly selected NF instance. */
+void
+onvm_pkt_enqueue_nf_instance(struct queue_mgr *tx_mgr, uint16_t dst_instance_id, struct rte_mbuf *pkt,
+                             struct onvm_nf *source_nf);
+
 /*
  * Function to send packets to one port after processing them.
  *

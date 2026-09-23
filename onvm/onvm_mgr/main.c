@@ -53,6 +53,7 @@
 #include "onvm_nf.h"
 #include "onvm_pkt.h"
 #include "onvm_stats.h"
+#include "onvm_upf.h"
 
 /****************************Internal Declarations****************************/
 
@@ -189,8 +190,12 @@ rx_thread_main(void *arg) {
         RTE_LOG(INFO, APP, "Socket %d, Core %d: Running RX thread for RX queue %d\n", rte_socket_id(), cur_lcore, rx_mgr->id);
 
         for (; worker_keep_running;) {
+                rte_spinlock_lock(&onvm_upf_lock);
+                onvm_upf_sync();
                 /* Read ports */
                 for (i = 0; i < ports->num_ports; i++) {
+                        if (onvm_upf_port_destination(ports->id[i]) < 0)
+                                continue;
                         rx_count = rte_eth_rx_burst(ports->id[i], rx_mgr->id, pkts, PACKET_READ_SIZE);
                         ports->rx_stats.rx[ports->id[i]] += rx_count;
 
@@ -204,6 +209,7 @@ rx_thread_main(void *arg) {
                                 }
                         }
                 }
+                rte_spinlock_unlock(&onvm_upf_lock);
         }
 
         RTE_LOG(INFO, APP, "Socket %d, Core %d: RX thread done\n", rte_socket_id(), rte_lcore_id());

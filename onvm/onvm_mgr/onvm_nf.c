@@ -49,6 +49,7 @@
 #include "onvm_nf.h"
 #include "onvm_mgr.h"
 #include "onvm_stats.h"
+#include "onvm_upf.h"
 #include <rte_lpm.h>
 
 /* ID 0 is reserved */
@@ -185,6 +186,7 @@ onvm_nf_check_status(void) {
         struct ft_request *ft;
         uint16_t stop_nf_id;
         int num_msgs = rte_ring_count(incoming_msg_queue);
+        int nf_result;
 
         if (num_msgs == 0)
                 return;
@@ -207,13 +209,19 @@ onvm_nf_check_status(void) {
                                 break;
                         case MSG_NF_STARTING:
                                 nf_init_cfg = (struct onvm_nf_init_cfg *)msg->msg_data;
-                                if (onvm_nf_start(nf_init_cfg) == 0) {
+                                rte_spinlock_lock(&onvm_upf_lock);
+                                nf_result = onvm_nf_start(nf_init_cfg);
+                                rte_spinlock_unlock(&onvm_upf_lock);
+                                if (nf_result == 0) {
                                         onvm_stats_gen_event_nf_info("NF Starting", &nfs[nf_init_cfg->instance_id]);
                                 }
                                 break;
                         case MSG_NF_READY:
                                 nf = (struct onvm_nf *)msg->msg_data;
-                                if (onvm_nf_ready(nf) == 0) {
+                                rte_spinlock_lock(&onvm_upf_lock);
+                                nf_result = onvm_nf_ready(nf);
+                                rte_spinlock_unlock(&onvm_upf_lock);
+                                if (nf_result == 0) {
                                         onvm_stats_gen_event_nf_info("NF Ready", nf);
                                 }
                                 break;
@@ -224,7 +232,10 @@ onvm_nf_check_status(void) {
 
                                 /* Saved as onvm_nf_stop frees the memory */
                                 stop_nf_id = nf->instance_id;
-                                if (onvm_nf_stop(nf) == 0) {
+                                rte_spinlock_lock(&onvm_upf_lock);
+                                nf_result = onvm_nf_stop(nf);
+                                rte_spinlock_unlock(&onvm_upf_lock);
+                                if (nf_result == 0) {
                                         onvm_stats_gen_event_info("NF Stopping", ONVM_EVENT_NF_STOP, &stop_nf_id);
                                 }
                                 break;
@@ -359,6 +370,8 @@ onvm_nf_stop(struct onvm_nf *nf) {
         if (nf_status != NF_STARTING && nf_status != NF_RUNNING && nf_status != NF_PAUSED)
                 return 1;
 
+        /* Stop polling before ring cleanup; RX has completed its previous pass. */
+        onvm_upf_forget_nf(nf_id);
         nf->status = NF_STOPPED;
         nfs[nf->instance_id].status = NF_STOPPED;
 

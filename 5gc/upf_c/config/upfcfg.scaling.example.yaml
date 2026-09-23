@@ -1,5 +1,5 @@
-# Phase 1: parses/publishes INACTIVE slots only. Dynamic session admission is
-# unavailable until the subsequent activation, spawning and steering phases.
+# Phases 1-2: publishes INACTIVE slots; manager stops polling their VF pairs.
+# Dynamic session admission remains unavailable until spawning and steering.
 info:
   version: 1.0.0
   description: UPF-C worker-slot configuration

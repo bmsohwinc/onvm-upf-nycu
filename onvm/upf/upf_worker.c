@@ -25,6 +25,39 @@ int UpfWorkerRegistryCreate(uint16_t service_limit) {
     return 0;
 }
 
+int UpfWorkerPollRequest(const UpfWorkerPollUpdate *update, uint32_t *sequence) {
+    if (!UpfWorkerRegistryIsConfigured())
+        return -ENOENT;
+    int status = UpfWorkerPollingStatus();
+    if (status != 1)
+        return status < 0 ? status : -EAGAIN;
+    if (!update || !sequence || update->slot >= g_upf_workers->config.slot_count ||
+        !update->generation || !update->instance_id || update->enable > 1)
+        return -EINVAL;
+    uint32_t previous = __atomic_load_n(&g_upf_workers->poll_request_seq, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&g_upf_workers->poll_ack_seq, __ATOMIC_ACQUIRE) != previous)
+        return -EBUSY;
+    if (previous == UINT32_MAX)
+        return -EOVERFLOW;
+    g_upf_workers->poll_request = *update;
+    *sequence = previous + 1;
+    __atomic_store_n(&g_upf_workers->poll_request_seq, *sequence, __ATOMIC_RELEASE);
+    return 0;
+}
+
+int UpfWorkerPollResult(uint32_t sequence, int32_t *result) {
+    if (!g_upf_workers)
+        return -ENOENT;
+    if (!sequence || !result)
+        return -EINVAL;
+    if (__atomic_load_n(&g_upf_workers->poll_request_seq, __ATOMIC_RELAXED) != sequence)
+        return -ESTALE;
+    if (__atomic_load_n(&g_upf_workers->poll_ack_seq, __ATOMIC_ACQUIRE) != sequence)
+        return -EINPROGRESS;
+    *result = g_upf_workers->poll_result;
+    return 0;
+}
+
 int UpfWorkerRegistryAttach(void) {
     const struct rte_memzone *mz = rte_memzone_lookup(MZ_UPF_WORKERS);
     if (!mz)

@@ -54,7 +54,7 @@
 /*********************************Interfaces**********************************/
 
 /* Port -> UPF-U service ID; zero selects the normal service chain.
- * Manager-local placeholder; configure before packet threads start.
+ * Legacy fallback; ignored once UPF-C's dynamic configuration is installed.
  */
 extern uint16_t onvm_port_to_upf_service[RTE_MAX_ETHPORTS];
 

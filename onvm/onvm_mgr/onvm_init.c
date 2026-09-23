@@ -245,10 +245,10 @@ init(int argc, char *argv[]) {
                 port_id = ports->id[i];
                 uint16_t service = onvm_port_to_upf_service[port_id];
                 if (service >= num_services)
-                        rte_exit(EXIT_FAILURE, "Port %u maps to service %u outside manager service range [0, %u)\n",
-                                 port_id, service, num_services);
-                if (service != 0)
-                        printf("Port %u ingress -> UPF-U service %u RX ring\n", port_id, service);
+                        printf("Port %u legacy service %u is outside [0, %u); ingress drops until dynamic activation\n",
+                               port_id, service, num_services);
+                else if (service != 0)
+                        printf("Port %u legacy ingress -> UPF-U service %u RX ring (dynamic config overrides)\n", port_id, service);
                 rte_eth_macaddr_get(port_id, &ports->mac[port_id]);
                 retval = init_port(port_id);
                 if (retval != 0)

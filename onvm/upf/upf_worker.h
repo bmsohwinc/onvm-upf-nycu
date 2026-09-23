@@ -13,7 +13,7 @@ extern "C" {
 #define UPF_MAX_WORKERS 32
 #define UPF_WORKER_PATH_LEN 512
 #define MZ_UPF_WORKERS "UPF_WORKERS"
-#define UPF_WORKERS_ABI_VERSION 1
+#define UPF_WORKERS_ABI_VERSION 2
 
 /* A configured slot reserves resources; its array index is the slot ID.
  * Ports are DPDK port IDs. VF indices are relative to their respective PF.
@@ -56,10 +56,18 @@ typedef struct {
     uint16_t instance_id;        /* Assigned by manager; zero until registered. */
 } UpfWorkerRuntime;
 
+typedef struct {
+    uint32_t generation;         /* Nonzero, increases on each start of a slot. */
+    uint16_t slot;
+    uint16_t instance_id;
+    uint8_t enable;              /* Zero disables polling for rollback. */
+} UpfWorkerPollUpdate;
+
 /* Manager creates the registry. UPF-C publishes configuration once per run.
  * The shared structures contain values only, never process-private pointers.
- * Readers must acquire configured before accessing config/runtime. Runtime
- * transitions and registration will be implemented with worker activation.
+ * Readers must acquire configured before accessing config. UPF-C owns runtime;
+ * manager owns polling_status and the ACK. The mailbox has one UPF-C producer
+ * and one manager RX consumer, with at most one outstanding request.
  */
 typedef struct {
     uint32_t abi_version;
@@ -67,6 +75,11 @@ typedef struct {
     uint16_t service_limit;      /* Manager's configured service-ID bound. */
     UpfScalingConfig config;
     UpfWorkerRuntime runtime[UPF_MAX_WORKERS];
+    int32_t polling_status;      /* 0 pending, 1 installed, negative errno. */
+    UpfWorkerPollUpdate poll_request;
+    uint32_t poll_request_seq;   /* Release publishes request fields. */
+    int32_t poll_result;         /* 0 success or negative errno. */
+    uint32_t poll_ack_seq;       /* Release publishes result and applied map. */
 } UpfWorkerRegistry;
 
 extern UpfWorkerRegistry *g_upf_workers;
@@ -74,6 +87,16 @@ extern UpfWorkerRegistry *g_upf_workers;
 int UpfWorkerRegistryCreate(uint16_t service_limit); /* Manager only, before NFs. */
 int UpfWorkerRegistryAttach(void);  /* Secondary processes; never creates. */
 int UpfWorkerRegistryPublish(const UpfScalingConfig *config); /* UPF-C only. */
+
+/* UPF-C event-loop API: never waits. Do not reuse the mailbox until Result
+ * completes. An unacknowledged request must not be cancelled by overwriting it.
+ */
+int UpfWorkerPollRequest(const UpfWorkerPollUpdate *update, uint32_t *sequence);
+int UpfWorkerPollResult(uint32_t sequence, int32_t *result); /* -EINPROGRESS while pending. */
+
+static inline int UpfWorkerPollingStatus(void) {
+    return g_upf_workers ? __atomic_load_n(&g_upf_workers->polling_status, __ATOMIC_ACQUIRE) : 0;
+}
 
 static inline int UpfWorkerRegistryIsConfigured(void) {
     return g_upf_workers && __atomic_load_n(&g_upf_workers->configured, __ATOMIC_ACQUIRE);
