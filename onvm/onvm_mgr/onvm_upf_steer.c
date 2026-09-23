@@ -5,12 +5,9 @@
 #include <errno.h>
 #include <arpa/inet.h>
 #include <limits.h>
-#include <signal.h>
-#include <spawn.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #include <linux/ethtool.h>
 #include <linux/sockios.h>
@@ -19,7 +16,6 @@
 #include "onvm_upf.h"
 #include "upf_worker.h"
 
-extern char **environ;
 static int control_fd = -1, probed;
 static uint32_t capacity[2];
 static uint32_t n3_generation[UPF_MAX_WORKERS];
@@ -27,13 +23,7 @@ static struct {
     uint32_t generation;
     uint16_t slot;
     struct in_addr ue;
-    int uncertain_route;
 } sessions[UPF_MAX_SESSION_RULES];
-static UpfSteerUpdate pending;
-static uint32_t pending_sequence;
-static pid_t helper_pid;
-static uint64_t helper_deadline;
-static int helper_timed_out;
 
 static int ethctl(const char *pf, void *command) {
     struct ifreq ifr = {0};
@@ -74,7 +64,6 @@ static int probe(void) {
     const UpfScalingConfig *cfg = &g_upf_workers->config;
     if (control_fd < 0) control_fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (control_fd < 0) return -errno;
-    if (access(cfg->dn_route_helper, X_OK) < 0) return -errno;
     int rc = probe_pf(cfg->n3_pf, 0);
     if (rc == 0) rc = probe_pf(cfg->n6_pf, 1);
     if (rc < 0) return rc;
@@ -115,29 +104,6 @@ static int filter(unsigned side, uint32_t location, uint16_t vf, struct in_addr 
     return ethctl(pf, &command);
 }
 
-static int start_route_helper(const UpfSteerUpdate *update) {
-    const UpfScalingConfig *cfg = &g_upf_workers->config;
-    const UpfWorkerSlotConfig *slot = &cfg->slots[update->slot];
-    char ue[INET_ADDRSTRLEN], via[INET_ADDRSTRLEN], mac[RTE_ETHER_ADDR_FMT_SIZE];
-    inet_ntop(AF_INET, &update->ue_addr, ue, sizeof(ue));
-    inet_ntop(AF_INET, &slot->n6_addr, via, sizeof(via));
-    rte_ether_format_addr(mac, sizeof(mac), &ports->mac[slot->n6_port]);
-    char *argv[] = {(char *)cfg->dn_route_helper, "--remote", (char *)cfg->dn_host,
-        update->operation == UPF_STEER_SESSION_ADD ? "add" : "del",
-        (char *)cfg->dn_interface, ue, via, mac, NULL};
-    posix_spawnattr_t attr;
-    int rc = posix_spawnattr_init(&attr);
-    if (rc) return -rc;
-    rc = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
-    if (!rc) rc = posix_spawnattr_setpgroup(&attr, 0);
-    if (!rc) rc = posix_spawn(&helper_pid, cfg->dn_route_helper, NULL, &attr, argv, environ);
-    posix_spawnattr_destroy(&attr);
-    if (rc) { helper_pid = 0; return -rc; }
-    helper_deadline = rte_get_timer_cycles() + 15 * rte_get_timer_hz();
-    helper_timed_out = 0;
-    return 0;
-}
-
 static int apply(const UpfSteerUpdate *update) {
     if (update->operation == UPF_STEER_PROBE) return probe();
     if (!probed) return -EAGAIN;
@@ -166,59 +132,26 @@ static int apply(const UpfSteerUpdate *update) {
             sessions[index].slot = update->slot;
             sessions[index].ue = update->ue_addr;
         }
+        return 0;
     } else if (update->operation != UPF_STEER_SESSION_DEL) return -EINVAL;
-    else if (!sessions[index].generation) return 0; /* No owned filter or helper attempt. */
-    /* An owned filter requires DN rollback, including after an uncertain add.
-     * Remove the NIC entry only after route rollback is acknowledged. */
-    return start_route_helper(update);
-}
-
-static void acknowledge(int result) {
-    RTE_LOG(INFO, APP, "UPF steering op=%u slot=%u session=%u result=%d\n",
-            pending.operation, pending.slot, pending.session_index, result);
-    g_upf_workers->steer_result = result;
-    __atomic_store_n(&g_upf_workers->steer_ack_seq, pending_sequence, __ATOMIC_RELEASE);
-    pending_sequence = 0;
+    else if (!sessions[index].generation) return 0; /* No owned filter. */
+    rc = filter(1, index, slot->n6_vf, update->ue_addr, 0);
+    if (!rc) memset(&sessions[index], 0, sizeof(sessions[index]));
+    return rc;
 }
 
 void onvm_upf_steer_poll(void) {
     if (!UpfWorkerRegistryIsConfigured()) return;
-    if (helper_pid > 0) {
-        int status;
-        pid_t rc = waitpid(helper_pid, &status, WNOHANG);
-        if (!rc) {
-            if (!helper_timed_out && rte_get_timer_cycles() > helper_deadline) {
-                kill(-helper_pid, SIGKILL);
-                helper_timed_out = 1;
-            }
-            return;
-        }
-        if (rc < 0 && errno == EINTR) return;
-        int result = helper_timed_out ? -ETIMEDOUT :
-            rc < 0 ? -errno : WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -EIO;
-        helper_pid = 0;
-        /* SSH failure cannot prove when a remote add stopped. Reserve the UE
-         * even if a later cleanup succeeds, so a late route cannot be reused. */
-        if (result && pending.operation == UPF_STEER_SESSION_ADD)
-            sessions[pending.session_index].uncertain_route = 1;
-        if (!result && pending.operation == UPF_STEER_SESSION_DEL && sessions[pending.session_index].generation) {
-            const UpfWorkerSlotConfig *slot = &g_upf_workers->config.slots[pending.slot];
-            result = filter(1, pending.session_index, slot->n6_vf, pending.ue_addr, 0);
-            if (!result && sessions[pending.session_index].uncertain_route) result = -EUCLEAN;
-            if (!result) memset(&sessions[pending.session_index], 0, sizeof(sessions[0]));
-        }
-        acknowledge(result);
-        return;
-    }
     uint32_t sequence = __atomic_load_n(&g_upf_workers->steer_request_seq, __ATOMIC_ACQUIRE);
     if (sequence == __atomic_load_n(&g_upf_workers->steer_ack_seq, __ATOMIC_RELAXED)) return;
-    pending_sequence = sequence;
-    pending = g_upf_workers->steer_request;
-    int result = apply(&pending);
-    if (result || !helper_pid) acknowledge(result);
+    UpfSteerUpdate update = g_upf_workers->steer_request;
+    int result = apply(&update);
+    RTE_LOG(INFO, APP, "UPF steering op=%u slot=%u session=%u result=%d\n",
+            update.operation, update.slot, update.session_index, result);
+    g_upf_workers->steer_result = result;
+    __atomic_store_n(&g_upf_workers->steer_ack_seq, sequence, __ATOMIC_RELEASE);
 }
 
 void onvm_upf_steer_shutdown(void) {
-    if (helper_pid > 0) { kill(-helper_pid, SIGKILL); waitpid(helper_pid, NULL, 0); }
     if (control_fd >= 0) close(control_fd);
 }

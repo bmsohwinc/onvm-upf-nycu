@@ -10,7 +10,7 @@ scale-down. The target is Intel X520/82599 and a Linux DN running iperf.
 1. Configuration and shared worker registry: committed in `6677bf0`.
 2. Acknowledged manager polling/dispatch updates: committed in `06baf8b`.
 3. UPF-C admission/spawning and classifier reader registration: implemented.
-4. Manager PF filters, DN routes and deferred PFCP completion: implemented.
+4. Manager PF filters and deferred PFCP completion: implemented.
 5. Linux build and end-to-end verification on the testbed: remaining.
 
 Phases 3–4 were implemented together. No tests were added for these phases,
@@ -37,8 +37,10 @@ exclusive. The static configuration continues to use its original packet path.
 | `worker_binary` | Absolute executable path to `l25gc_upf_u` on the CN. |
 | `file_prefix` | Same EAL namespace as manager and UPF-C; default `rte`. |
 | `startup_timeout_ms` | Worker registration/classifier startup deadline; default 30000. This is not a spawning cooldown. |
-| `dn_route_helper` | Absolute path to the provided helper, installed at the same path on CN and DN. |
-| `dn_host`, `dn_interface` | SSH destination such as `cloudlab_user@dn-host`, and DN's Linux N6 interface. |
+
+Remove `dn_route_helper`, `dn_host` and `dn_interface` from older configurations;
+these keys are no longer accepted. DN routing is configured manually, once per
+UE subnet, and is not part of the worker configuration or admission ACKs.
 
 The NF RX ring is sized at **65536 entries (65535 usable)**; 32 is the packet
 burst size. The shared dataplane pool also limits occupancy (`NUM_MBUFS=32767`).
@@ -50,7 +52,7 @@ are not subsequently resampled for an already selected session.
 
 ## Setup
 
-1. Rebuild manager and all NFs together. The registry ABI is now **3**, and the
+1. Rebuild manager and all NFs together. The registry ABI is now **4**, and the
    shared session/PFCP layouts changed. Restart the whole deployment between
    configurations; attaching a replacement UPF-C to a live run is unsupported.
 2. Follow the [PF/VF preparation](README.md) for every configured slot. Create
@@ -70,24 +72,30 @@ are not subsequently resampled for an already selected session.
    sudo ip neigh replace "$N3_IP2" lladdr "$N3_MAC2" nud permanent dev "$RAN_LINK"
    ```
 
-   82599 flow filters do not replace Ethernet delivery to the correct VF. The
-   DN helper establishes the equivalent N6 neighbor entries when needed.
-5. Install [scripts/upf-dn-route](../../scripts/upf-dn-route) on **both nodes**:
+   These entries retain the existing N3 setup. N6 uses the shared PF gateway
+   below; its destination-IP filters select the worker VF.
+5. Assign an N6 IP to the CN's kernel-owned N6 PF, distinct from the worker
+   IPs, and install one route for the UE subnet on DN. For the example addresses:
 
    ```sh
-   sudo install -o root -g root -m 0755 scripts/upf-dn-route /usr/local/sbin/upf-dn-route
+   # On CN; replace N6_PF with its Linux interface name.
+   sudo ip address replace 192.168.3.1/24 dev "$N6_PF"
+   sudo ip link set dev "$N6_PF" up
+
+   # On DN; DN_LINK is its Linux N6 interface (192.168.3.2/24).
+   sudo ip route replace 10.60.0.0/24 via 192.168.3.1 dev "$DN_LINK"
+   ip route get 10.60.0.1
    ```
 
-   CN needs Python 3 and an SSH client; DN needs Python 3, iproute2 and `timeout`.
-   Configure the manager's execution account (normally root) for noninteractive
-   SSH to `dn_host`, including its known-host entry. Allow that DN account
-   passwordless sudo for the root-owned helper. The helper receives only
-   operation, interface, UE IP, worker N6 IP and MAC; commands use argument
-   vectors, with quoting for the SSH command. Existing routes with another
-   next hop or protocol owner are rejected.
-   Remove the guide's old static UE `/32` routes before this run; the helper
-   deliberately refuses to replace them, even when their next hop matches.
-6. Edit the example's paths, PF/VF/port/core/IP values and DN access settings.
+   DN resolves the PF IP through ARP. Return frames use the PF destination MAC
+   and the UE destination IP; the NIC's per-UE rule selects the N6 VF before
+   delivery to the manager. This PF-MAC/IP-filter path was verified in the
+   user's earlier pkt-gen/VF experiment on the same machine and NIC; full UPF
+   traffic remains to be verified. DN needs no per-worker routes or neighbors.
+   Remove any old per-UE `/32` routes (including helper routes tagged with
+   protocol 242), since they override the subnet route. The manager does not
+   connect to DN, install routes, or validate this manual route.
+6. Edit the example's paths and PF/VF/port/core/IP values.
    Start manager and other control NFs as in the guide, then start UPF-C with
    this config. For example, if core 8 is reserved for UPF-C:
 
@@ -99,7 +107,7 @@ are not subsequently resampled for an already selected session.
    secondary with the configured core/service and `--no-pci`; it obtains
    ports, IPs, next hops and MACs from shared configuration. No per-worker YAML
    is generated. Leave the existing SMF CH=1/Created-PDR endpoint handling enabled.
-   Ensure SMF's PFCP retransmission window covers worker startup and DN routing;
+   Ensure SMF's PFCP retransmission window covers worker startup and NIC steering;
    retaining the UPF-C transaction cannot extend the SMF's own timeout.
 
 ## Runtime sequence
@@ -110,7 +118,7 @@ child status uses `waitpid(WNOHANG)`. No session waits in a blocking loop.
 Dynamic mode disables the separate PFCP timer thread; static mode retains it.
 Manager services lifecycle and steering requests every millisecond, independently
 of its statistics interval;
-PF ioctls and the DN helper run outside the packet RX thread.
+PF ioctls run outside the packet RX thread.
 
 Before starting a worker, UPF-C registers its classifier-reader generation and
 rechecks core/service availability. The worker attaches its slot, initializes
@@ -120,8 +128,8 @@ boundary. UPF-C marks the worker READY only after that ACK.
 
 For an establishment, UPF-C retains the parsed PFCP request/transaction, selects
 one worker, allocates a unique TEID and builds its session rules. Pending sessions
-remain blocked from processing. Manager installs the N6 rule and asynchronously
-runs the DN helper; UPF-C waits for that ACK and the owner's classifier ACK,
+remain blocked from processing. Manager installs the N6 rule and acknowledges
+the local ioctl result; UPF-C waits for that ACK and the owner's classifier ACK,
 then caches the success response, enables session processing and sends the N3
 IP/TEID to SMF. Retransmissions reuse the same transaction and endpoint.
 
@@ -129,13 +137,14 @@ IP/TEID to SMF. Retransmissions reuse the same transaction and endpoint.
 | --- | --- | --- |
 | N3 PF | Outer destination = worker N3 IP, UDP destination port 2152 → worker N3 VF, queue 0 | One per started worker; location = slot ID |
 | N6 PF | IPv4 destination = UE IP, all transport protocols → owner N6 VF, queue 0 | One per session; location = shared session index |
-| DN | `UE_IP/32 via WORKER_N6_IP dev DN_INTERFACE`, plus a permanent neighbor for that next hop | Helper tags routes with protocol 242 for rollback ownership |
+| DN (manual setup) | `UE_SUBNET via CN_N6_PF_IP dev DN_INTERFACE`; ARP resolves the PF MAC | One static route per UE subnet, independent of worker/session lifetime |
 
 The ioctl encodes VF `v`, queue 0 as `(v + 1) << 32`; each PF uses one consistent
 filter mask. The implementation follows the
 [Linux ixgbe filter API](https://raw.githubusercontent.com/torvalds/linux/v6.8/drivers/net/ethernet/intel/ixgbe/ixgbe_ethtool.c).
-The existing [MAC-delivery requirements](README.md) still apply. No NIC TEID match
-is needed because each worker has its own N3 destination IP.
+N6 return traffic uses the shared PF MAC; the destination-IP filter selects the
+VF queue. See the [82599 flow-bifurcation guide](https://doc.dpdk.org/guides-19.11/howto/flow_bifurcation.html#using-flow-bifurcation-on-ixgbe-in-linux).
+No NIC TEID match is needed because each worker has its own N3 destination IP.
 
 ## Shared ownership and failure behavior
 
@@ -152,30 +161,29 @@ spawn and removed only after confirmed process exit. Inactive slots do not block
 reclamation. The shared NF lock protects ring lifetime during admission reads.
 
 There is one outstanding steering operation at a time, and its result must be
-consumed before the next submission. Polling ACKs remain separate from NIC/DN
+consumed before the next submission. Polling ACKs remain separate from NIC
 ACKs. UPF-U continues to use RX/TX rings for all packets, including ARP.
 
 Up to 64 establishments can wait concurrently, each with a deadline of
 `startup_timeout_ms + 60000`. Worker or steering failures produce a PFCP rejection.
 Submitted mailbox operations are consumed before rollback; they are never
-overwritten on timeout. Failed-session rollback removes its DN route and N6
-filter, withdraws its PDRs, and waits for all readers before freeing resources.
+overwritten on timeout. Failed-session rollback removes its N6 filter,
+withdraws its PDRs, and waits for all readers before freeing resources.
 If cleanup cannot be confirmed, the failed session stays inactive and retains
-its UE/TEID/resources until restart. A failed DN helper also reserves the UE
-after cleanup, since SSH failure cannot prove that a remote add has stopped.
+its UE/TEID/resources until restart. The manual DN route is never modified.
 
 Failed worker slots stop being polled and are not reused; existing sessions are
-not moved. Started N3 filters and admitted-session DN routes persist until
+not moved. Started N3 filters and admitted-session N6 filters persist until
 operator cleanup with applications stopped. Before another run, clear old PF
-rules and inspect/remove this deployment's DN routes tagged with protocol 242.
+rules. The static DN subnet route can be reused across runs.
 The normal session-deletion/scale-down workflow is outside this implementation;
 dynamic-mode deletion requests return a PFCP rejection and retain the session.
 
 ## Validation status
 
 Phases 1–2 had local mock-based checks recorded in the change history. For
-phases 3–4 no tests were added or run. Available compiler syntax checks cover the
-configuration parser and registry; YAML and helper syntax and diff whitespace
-are checked locally. A full Linux/DPDK build, SSH/sudo integration and actual
-X520 traffic still require the testbed. Local Mac tooling lacks Meson/DPDK and
-the Docker daemon is not running.
+phases 3–4 no tests were added or run; their local compiler checks covered the
+configuration parser and registry. The manual-DN-routing change has shared-header
+and YAML syntax checks plus diff whitespace review, with no tests added.
+A full Linux/DPDK build and end-to-end UPF traffic still require the testbed;
+Meson and the Linux/DPDK build dependencies are unavailable locally.

@@ -330,7 +330,7 @@ static void advance_request(struct Pending *p) {
         break;
     }
     if (p->stage == QUARANTINED)
-        UTLT_Error("Failed establishment SEID=%lu retained inactive: rollback uncertain; restart after repairing DN/PF state",
+        UTLT_Error("Failed establishment SEID=%lu retained inactive: rollback uncertain; restart after repairing PF/classifier state",
                    p->session->upfSeid);
 }
 

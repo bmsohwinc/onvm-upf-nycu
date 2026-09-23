@@ -50,7 +50,7 @@ positions in its `cells` array; use the section titles when viewing Jupyter.
 | Cell 30: PCI/DPDK port table | Derive VF BDFs from each PF's `virtfnN`, then read actual port IDs from manager startup. `dpdk-devbind.py` list order is not a DPDK port-ID contract. |
 | Cells 32, 34, 36: AMF, SMF, single UPF-U | Set the new N2 address, retain one UPF-C in SMF, and generate two worker configs. Patched SMF receives per-session N3 endpoints through PFCP. |
 | Cell 40: UE/RAN host route to DN via one N3 IP | Omit it for UE traffic. Use the UE TUN interfaces and source-based routing in step 8. |
-| Cell 48: DN route for the entire UE subnet via one N6 IP | For a kernel DN, install two UE `/32` routes, each through its worker's N6 IP. A MAC-swapping reflector uses its existing return path. |
+| Cell 48: DN route for the entire UE subnet via one N6 IP | Retain one UE-subnet route via the CN's kernel-owned N6 PF IP; NIC UE-IP filters select the worker VF. A MAC-swapping reflector uses its existing return path. |
 | Tutorial subscriber/NF/UERANSIM steps | Keep them, with two subscribers, two UPF-Us, distinct static UE IPs and five CN terminals. |
 | Notebook cell 44 / tutorial OAI handover section | Skip for this connect-once experiment. Start with UERANSIM; the handover procedure is outside the implemented model. |
 
@@ -65,8 +65,9 @@ Intel NIC may need another PF driver and different filter commands.
 Use two 10-Gbit/s experiment links. On node2, the first PF carries kernel N2
 traffic to its PF MAC and N3 traffic to its two VF MACs. Its PF remains under
 `ixgbe`, so AMF can use it while the manager polls the VFs. The second PF supplies
-the two N6 VFs. This preserves the three logical IP subnets using two physical
-ports; N2 does not need a third data NIC.
+the two N6 VFs and a kernel N6 gateway IP for DN's UE-subnet route. This preserves
+the three logical IP subnets using two physical ports; N2 does not need a third
+data NIC.
 
 ```mermaid
 flowchart LR
@@ -106,7 +107,7 @@ cn_core = nodes["cn"].addInterface("n6")
 dn = nodes["dn"].addInterface("n6")
 ran.addAddress(pg.IPv4Address("192.168.1.1", "255.255.255.0"))
 cn_access.addAddress(pg.IPv4Address("192.168.1.2", "255.255.255.0"))
-# This PF address is for initial link checks; workers use .11 and .12.
+# DN routes the UE subnet via this PF address; workers use .11 and .12.
 cn_core.addAddress(pg.IPv4Address("192.168.3.1", "255.255.255.0"))
 dn.addAddress(pg.IPv4Address("192.168.3.2", "255.255.255.0"))
 for name, members in (("n2n3", [ran, cn_access]), ("n6", [cn_core, dn])):
@@ -140,7 +141,7 @@ interfaces and the management interface to leave alone.
 | `192.168.2.11`, `.12` | worker 1/2 N3 IPs, in UPF-U YAML |
 | `192.168.3.11`, `.12` | worker 1/2 N6 IPs, in UPF-U YAML |
 | `192.168.3.2/24` | node3 DN endpoint |
-| `192.168.3.1/24` | node2 kernel N6 PF, diagnostic address only |
+| `192.168.3.1/24` | node2 kernel N6 PF, DN's gateway for the UE subnet |
 
 On node1, add its N3 address to the actual `n2n3` device and check N2:
 
@@ -423,7 +424,7 @@ filters. `vfio-pci` exposes the VFs to DPDK's ixgbe VF PMD. VF BDF numbering
 can interleave between the two ports; derive it through `virtfnN`, as above.
 [DPDK 24.07 Intel VF guide](https://doc.dpdk.org/guides-24.07/nics/intel_vf.html)
 
-## 4. Install the static NIC rules and arrange MAC delivery
+## 4. Install the static NIC rules and DN route
 
 Install these rules while the applications are stopped:
 
@@ -446,10 +447,12 @@ VF selector. Distinct N3 destination IPs avoid needing GTP/TEID parsing in
 the NIC. [Intel ixgbe filter syntax](https://raw.githubusercontent.com/intel/ethernet-linux-ixgbe/main/README),
 [Linux v6.8 ixgbe filter implementation](https://raw.githubusercontent.com/torvalds/linux/v6.8/drivers/net/ethernet/intel/ixgbe/ixgbe_ethtool.c)
 
-**82599 Flow Director does not override the VF selected by Ethernet routing.**
-Frames must also have the intended VF's destination MAC (or equivalent correct
-VLAN/pool delivery). Sending every packet to the PF MAC and adding only the IP
-rules above is insufficient. [Intel 82599 datasheet, sections 7.1.2.2 and 7.1.2.7.1](https://www.mouser.com/pdfdocs/82599datasheet.pdf)
+**N6 return traffic can use the PF MAC with IP filters selecting the VF queue.**
+The user's earlier pkt-gen experiment verified this behavior on the same
+X520/82599 machine: flows shared the PF destination MAC and reached their
+assigned VFs by destination-IP rules. This corrects the earlier guide's claim
+that each frame must use the target VF MAC. The Linux ixgbe VF-targeting
+mechanism is documented in the [DPDK flow-bifurcation guide](https://doc.dpdk.org/guides-19.11/howto/flow_bifurcation.html#using-flow-bifurcation-on-ixgbe-in-linux).
 
 On **node1**, use the real gNB N3 interface and the same N3 IP/MAC values:
 
@@ -478,22 +481,29 @@ A MAC/IP-only reflector is not an ICMP echo responder or an iperf3 server;
 test it with the traffic application designed for that reflector.
 
 For the original tutorial's **kernel ping/iperf DN**, keep node3's N6 port
-under its Linux driver with `192.168.3.2/24`. Replace the old route through
-one UPF with these more-specific routes and neighbors on node3:
+under its Linux driver with `192.168.3.2/24`. Keep node2's N6 PF on Linux
+`ixgbe` with `192.168.3.1/24`, distinct from the workers' N6 IPs:
+
+```bash
+# On node2 / CN
+sudo ip address replace 192.168.3.1/24 dev "$N6_PF"
+sudo ip link set dev "$N6_PF" up
+```
+
+On node3 / DN, install one route covering every UE:
 
 ```bash
 DN_LINK=ens1f0  # node3 experiment interface from the manifest
-sudo ip route replace 10.60.0.1/32 via 192.168.3.11 dev "$DN_LINK"
-sudo ip route replace 10.60.0.2/32 via 192.168.3.12 dev "$DN_LINK"
-sudo ip neigh replace 192.168.3.11 lladdr 02:00:00:06:00:01 nud permanent dev "$DN_LINK"
-sudo ip neigh replace 192.168.3.12 lladdr 02:00:00:06:00:02 nud permanent dev "$DN_LINK"
+sudo ip route replace 10.60.0.0/24 via 192.168.3.1 dev "$DN_LINK"
 ip route get 10.60.0.1
 ip route get 10.60.0.2
 ```
 
-Use your configured N6 VF MACs/IPs if different. Do not use the diagnostic
-PF address `192.168.3.1` as the UE next hop. The two `/32` routes also cover
-TCP ACKs, iperf control traffic and other return packets. Choose one DN mode
+DN ARPs for `192.168.3.1`; the CN kernel replies with the N6 PF MAC. Return
+frames retain the UE destination IP, which the NIC uses to select the N6 VF.
+No worker-specific DN routes or permanent neighbors are needed. Remove any
+old per-UE `/32` routes, including routes tagged with protocol 242 by the
+removed helper, because they override this subnet route. Choose one DN mode
 per run; a userspace app owning node3's whole NIC cannot simultaneously rely
 on that NIC's Linux IP/ARP/iperf stack.
 
@@ -772,7 +782,7 @@ defines mode 2 and how per-interface settings combine with `conf.all`.
 
 ### Optional kernel DN connectivity/throughput check
 
-With node3's Linux DN and the two return routes from step 4, reuse the
+With node3's Linux DN and the UE-subnet return route from step 4, reuse the
 tutorial's tests for each UE:
 
 ```bash
@@ -816,12 +826,12 @@ ping/iperf test verifies connectivity; it does not establish UPF capacity.
 | VF initialization or secondary attach fails | PFs still on `ixgbe` and up; same DPDK build, allowlist, hugepage mount and namespace; no old manager. |
 | Worker gets no ingress from its VF | Actual BDF-to-port mapping, manager `-k f`, port-to-service array, and a running NF at that service. |
 | NIC rule rejected | Installed ixgbe/ethtool support, occupied filter locations, matching mask conflicts and valid VF index. Inspect `ethtool -n`. |
-| N3 packets arrive at PF but worker gets no traffic | Destination VF MAC/last-hop neighbor mapping, VF VLAN and matching destination N3 IP; IP filters cannot override L2 routing. |
+| N3 packets arrive at PF but worker gets no traffic | Destination N3 IP/UDP port 2152 rule, selected VF/queue, VLAN, and gNB neighbor reachability. |
 | Worker receives packets but no data exits | ARP for the real gNB/DN address, worker config/ownership match, classifier installation and packet size. Node2 kernel routes do not supply the UPF gateway. |
 | PFCP rejects an explicit F-TEID | Rebuilt patched SMF is running and completed a fresh FTUP association. |
-| UE2 reaches worker 1 | Static UE IPs, UE attach order, N3 endpoint in N2, and both N6 MAC/IP filters. |
+| UE2 reaches worker 1 | Static UE IPs, UE attach order, N3 endpoint in N2, and N6 UE-IP-to-VF filters. |
 | AMF becomes unreachable after NIC setup | N2 IP remains on PF A, PF stays on `ixgbe`, and only the four VFs were bound to VFIO. |
-| iperf/ping bypasses GTP or receives no replies | Node1 source rules select the correct TUN; node3 `/32` routes select the correct N6 worker; UE and N3/N6 addresses match the installed rules. |
+| iperf/ping bypasses GTP or receives no replies | Node1 source rules select the correct TUN; node3's UE-subnet route uses the N6 PF IP; no old `/32` route overrides it; NIC UE-IP filters select the correct VF. |
 
 For another run, stop the UE processes, all control NFs and both workers, then
 stop the manager. Keep the VF setup/rules if unchanged; restart from step 5

@@ -141,7 +141,7 @@ Status UpfN4BuildSessionDeletionResponse(Bufblk **bufBlkPtr, uint8_t type,
 
     /* cause */
     response->cause.presence = 1;
-    /* Dynamic teardown needs NIC/DN withdrawal and is outside this phase. */
+    /* Dynamic teardown needs NIC filter withdrawal and is outside this phase. */
     cause = Self()->scaling.slot_count ? PFCP_CAUSE_REQUEST_REJECTED : PFCP_CAUSE_REQUEST_ACCEPTED;
     response->cause.value = &cause;
     response->cause.len = 1;

@@ -41,9 +41,6 @@ static const Field scaling_fields[] = {
     FIELD(UpfScalingConfig, n3_pf, FIELD_STRING, 1),
     FIELD(UpfScalingConfig, n6_pf, FIELD_STRING, 1),
     FIELD(UpfScalingConfig, file_prefix, FIELD_STRING, 0),
-    FIELD(UpfScalingConfig, dn_route_helper, FIELD_STRING, 1),
-    FIELD(UpfScalingConfig, dn_host, FIELD_STRING, 1),
-    FIELD(UpfScalingConfig, dn_interface, FIELD_STRING, 1),
     FIELD(UpfScalingConfig, startup_timeout_ms, FIELD_U32, 0),
     {"n3_peer_ip", FIELD_IP, offsetof(UpfScalingConfig, n3_peer_addr), sizeof(struct in_addr), 1},
     {"n6_peer_ip", FIELD_IP, offsetof(UpfScalingConfig, n6_peer_addr), sizeof(struct in_addr), 1},
@@ -146,8 +143,8 @@ int UpfScalingConfigParse(yaml_document_t *doc, yaml_node_t *mapping,
         return Fail(error, error_size, "Require 1 <= min_workers <= max_workers <= slot count");
     if (!config.rx_queue_threshold || !config.teid_first || config.teid_first > config.teid_last)
         return Fail(error, error_size, "Queue threshold and TEID range must be positive and ordered");
-    if (config.worker_binary[0] != '/' || config.dn_route_helper[0] != '/')
-        return Fail(error, error_size, "worker_binary and dn_route_helper must be absolute paths");
+    if (config.worker_binary[0] != '/')
+        return Fail(error, error_size, "worker_binary must be an absolute path");
     if (config.startup_timeout_ms < 1000 || config.startup_timeout_ms > 300000)
         return Fail(error, error_size, "startup_timeout_ms must be between 1000 and 300000");
     if (strspn(config.file_prefix, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != strlen(config.file_prefix))

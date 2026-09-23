@@ -13,7 +13,7 @@ extern "C" {
 #define UPF_MAX_WORKERS 32
 #define UPF_WORKER_PATH_LEN 512
 #define MZ_UPF_WORKERS "UPF_WORKERS"
-#define UPF_WORKERS_ABI_VERSION 3
+#define UPF_WORKERS_ABI_VERSION 4
 #define UPF_MAX_SESSION_RULES 1024
 
 /* A configured slot reserves resources; its array index is the slot ID.
@@ -42,9 +42,6 @@ typedef struct {
     char n3_pf[IF_NAMESIZE];
     char n6_pf[IF_NAMESIZE];
     char file_prefix[64];        /* Same EAL namespace as manager and UPF-C. */
-    char dn_route_helper[UPF_WORKER_PATH_LEN];
-    char dn_host[128];           /* SSH destination; helper is installed on both hosts. */
-    char dn_interface[IF_NAMESIZE];
     struct in_addr n3_peer_addr;
     struct in_addr n6_peer_addr;
     uint32_t startup_timeout_ms;

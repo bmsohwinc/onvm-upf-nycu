@@ -15,10 +15,26 @@ Dynamic scale-out is implemented through
 [phases 1–4](../dynamic-scaling.md). The opt-in configuration defines a pool of
 precreated VF pairs and dedicated cores. UPF-C starts workers on demand from
 current RX-ring occupancy, assigns multiple sessions per worker with distinct
-TEIDs, and waits for classifier, polling and NIC/DN acknowledgments before
+TEIDs, and waits for classifier, polling and NIC acknowledgments before
 completing PFCP establishment. The static packet path below remains available.
 
+## Manual DN routing
+
+- Remove manager SSH/helper execution, remote route acknowledgments and the
+  `scripts/upf-dn-route` helper. Manager still installs local N3/N6 NIC filters
+  requested by UPF-C; failed admission rolls back its owned N6 filter.
+- Remove `dn_route_helper`, `dn_host` and `dn_interface` from the configuration
+  and shared registry. Delete those keys from existing YAML. Registry ABI is
+  now 4; rebuild and restart manager and all NFs together.
+- Configure one DN route for the UE subnet via the CN's kernel-owned N6 PF IP.
+  DN ARPs for the PF MAC; NIC destination-IP filters steer return packets to
+  the assigned VF. The user's earlier pkt-gen experiment verified this steering
+  on the same machine/NIC. Remove old per-UE routes that override the subnet route.
+
 ## Phases 3–4: dynamic admission and steering
+
+The entries below record the original implementation; manual DN routing above
+supersedes its helper and remote-route behavior.
 
 - Add `upf_scaling.c`: event-loop startup/admission state, bounded pending PFCP
   requests, monotonic TEIDs, child reaping and failure rollback. Requests already
@@ -276,15 +292,15 @@ changes alone do not establish those relationships on the three nodes.
 
 | Changed files | Context and implementation |
 | --- | --- |
-| [docs/sriov-upf/README.md](../README.md) | Full setup procedure: Intel 82599 PF/VF drivers, four-VF creation, static filters and required MAC delivery, ARP reachability, builds, configs, startup order, captures and troubleshooting. |
+| [docs/sriov-upf/README.md](../README.md) | Full setup procedure: Intel 82599 PF/VF drivers, four-VF creation, static filters, ARP reachability, builds, configs, startup order, captures and troubleshooting. |
 | [smf-n3-allocation.patch](../smf-n3-allocation.patch) | Exact `git format-patch` export of the one SMF commit. Lets the deployed SMF repository apply the change without copying or building `old_ref/`. |
 | [README.md](../../../README.md) | Link the deployment guide from the repository entry point. |
 | [scripts/README.md](../../../scripts/README.md) | Use core 14 in the second-worker example to avoid the baseline control-NF script's core-5 assignment. |
 
 **Benefit.** The implementation has a reproducible deployment procedure and
-a portable SMF change. The guide records the 82599 MAC-delivery requirement
-alongside its IP filters, and distinguishes the software checks from hardware
-operation that still needs testing.
+a portable SMF change. Its original VF-MAC requirement is corrected by the
+manual DN routing update above. The guide distinguishes software checks from
+full UPF operation that still needs testbed verification.
 
 ## How the pieces work together
 
