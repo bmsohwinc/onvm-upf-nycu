@@ -1,0 +1,34 @@
+# Phase 1: parses/publishes INACTIVE slots only. Dynamic session admission is
+# unavailable until the subsequent activation, spawning and steering phases.
+info:
+  version: 1.0.0
+  description: UPF-C worker-slot configuration
+
+configuration:
+  debugLevel: info
+  pfcp:
+    - addr: 127.0.0.8
+  gtpu:
+    - addr: 10.100.200.3
+
+  # Mutually exclusive with the legacy upf_u_workers list.
+  scaling:
+    min_workers: 1
+    max_workers: 2             # Defaults to the number of slots if omitted.
+    rx_queue_threshold: 1024   # Packets; evaluated on new-session arrival.
+    worker_binary: /absolute/path/to/onvm-upf/build/5gc/l25gc_upf_u
+    n3_pf: ens1f0
+    n6_pf: ens1f1
+    teid_first: 0x1001         # One distinct TEID per session, across all workers.
+    teid_last: 0xffffffff
+
+    # Slot ID = array index. VF indices belong to the PF above; port IDs must
+    # match the manager's startup PCI-to-port mapping. They are NOT VF indices.
+    # MACs come from manager port information and are not duplicated here.
+    worker_slots:
+      - {service_id: 14, core: 3, n3_port: 0, n6_port: 2, n3_vf: 0, n6_vf: 0, n3_ip: 192.168.2.11, n6_ip: 192.168.3.11}
+      - {service_id: 15, core: 14, n3_port: 1, n6_port: 3, n3_vf: 1, n6_vf: 1, n3_ip: 192.168.2.12, n6_ip: 192.168.3.12}
+
+  dnn_list:
+    - dnn: internet
+      cidr: 10.60.0.0/24

@@ -1,6 +1,7 @@
 upf_sources = files(
   'upf.c',
   'upf_context.c',
+  'upf_worker.c',
   'upf_sess_buf.c'
 )
 

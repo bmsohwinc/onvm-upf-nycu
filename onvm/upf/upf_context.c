@@ -439,6 +439,13 @@ Status UpfSessionRemove(UpfSession *session) {
 }
 
 UpfSession *UpfSessionAddByMessage(PfcpMessage *message, uint8_t *cause) {
+    /* Slot configuration is available before dynamic placement is wired in.
+     * Never let an inactive pool fall through to legacy session allocation.
+     */
+    if (Self()->scaling.slot_count) {
+        *cause = PFCP_CAUSE_NO_RESOURCES_AVAILABLE;
+        return NULL;
+    }
     PFCPSessionEstablishmentRequest *request = &message->pFCPSessionEstablishmentRequest;
     *cause = PFCP_CAUSE_MANDATORY_IE_MISSING;
     UTLT_Assert(request->nodeID.presence && request->cPFSEID.presence &&

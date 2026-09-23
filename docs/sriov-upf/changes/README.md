@@ -11,6 +11,12 @@ worker's RX ring by ingress port ID, and transmits packets from NF TX rings.
 UPF-U uses rings for all packet I/O. The manager map is a simple local variable;
 UPF-C updates will be implemented later.
 
+Dynamic scale-out is being implemented in reviewed phases. The
+[phase 1 configuration/registry change](../dynamic-scaling.md) adds an opt-in
+worker-slot configuration with INACTIVE shared state. Dynamic admission,
+spawning, manager activation and NIC/DN steering are subsequent phases; the
+existing static packet path below remains in use.
+
 ## Current revision: manager polling and ring transport
 
 This revision supersedes the direct-I/O behavior in commits `8b3df26` and

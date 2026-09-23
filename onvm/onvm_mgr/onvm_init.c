@@ -260,6 +260,9 @@ init(int argc, char *argv[]) {
 
         check_all_ports_link_status(ports->num_ports, (~0x0));
 
+        if (UpfWorkerRegistryCreate(num_services) < 0)
+                rte_exit(EXIT_FAILURE, "Cannot create UPF worker registry\n");
+
         /* initialise a queue for newly created NFs */
         init_info_queue();
 

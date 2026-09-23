@@ -53,7 +53,7 @@ RTE_TARGET ?= x86_64-native-linuxapp-gcc
 LIB    = libupf.a
 
 # all source are stored in SRCS-y
-SRCS-y := upf_context.c upf.c
+SRCS-y := upf_context.c upf.c upf_worker.c
 
 CFLAGS += -O3 $(USER_FLAGS)
 CFLAGS += -I$(ONVM_HOME)/onvm/logger/

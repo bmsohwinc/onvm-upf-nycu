@@ -26,6 +26,8 @@ configuration:
     sgi: 1
 
   # Optional worker ownership (one UE per worker, in list order).
+  # Dynamic slot configuration is documented in upfcfg.scaling.example.yaml
+  # (phase 1 only; dynamic admission is not yet enabled).
   # Match each worker's ONVM service ID, UPF-U YAML and manager port-to-service map.
   # Requires an SMF that requests CH=1 and uses the returned Created PDR endpoint.
   # upf_u_workers:

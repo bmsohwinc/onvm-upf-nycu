@@ -27,6 +27,7 @@
 #include "updk/rule_qer.h"
 
 #include "list.h"
+#include "upf_worker.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,8 +58,6 @@ struct ReportMsg {
     uint64_t seid;
     uint16_t pdrId;
 };
-
-#define UPF_MAX_WORKERS 32
 
 /* One UPF-U service owns one N3/N6 VF pair. Addresses use network byte order. */
 typedef struct {
@@ -132,6 +131,7 @@ typedef struct {
     UpfWorker       workers[UPF_MAX_WORKERS];
     uint16_t        workerCount;         // 0 keeps the existing single-UPF-U mode
     uint16_t        nextWorker;          // One session per worker; no reuse in this demo
+    UpfScalingConfig scaling;           // Separate from the legacy static worker list
 } UpfContext;
 
 typedef struct _UpfUeIp {

@@ -17,6 +17,7 @@
 */
 
 #include "upf_config.h"
+#include "upf_worker_config.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -125,6 +126,43 @@ static Status ParseWorkers(YamlIter *config) {
                     worker.service_id, inet_ntoa(worker.n3_addr), worker.n3_port, worker.n6_port, worker.ul_teid);
     }
     UTLT_Assert(Self()->workerCount, return STATUS_ERROR, "upf_u_workers must not be empty");
+    return STATUS_OK;
+}
+
+static Status PublishWorkerSlots(void) {
+    const UpfScalingConfig *config = &Self()->scaling;
+    if (!config->slot_count) return STATUS_OK;
+    UTLT_Assert(!Self()->workerCount, return STATUS_ERROR,
+                "Use scaling.worker_slots or upf_u_workers, not both");
+    UTLT_Assert(UpfWorkerRegistryAttach() == 0, return STATUS_ERROR,
+                "Manager worker registry missing/incompatible; rebuild and restart manager");
+    const struct rte_memzone *port_mz = rte_memzone_lookup(MZ_PORT_INFO);
+    const struct rte_memzone *core_mz = rte_memzone_lookup(MZ_CORES_STATUS);
+    const struct rte_memzone *service_mz = rte_memzone_lookup(MZ_NF_PER_SERVICE_INFO);
+    UTLT_Assert(port_mz && port_mz->len >= sizeof(struct port_info) && core_mz && service_mz,
+                return STATUS_ERROR, "Manager port/core/service information is missing");
+    const struct port_info *manager_ports = port_mz->addr;
+    const struct core_status *manager_cores = core_mz->addr;
+    const uint16_t *service_counts = service_mz->addr;
+    UTLT_Assert(config->rx_queue_threshold < NF_QUEUE_RINGSIZE && config->rx_queue_threshold < NUM_MBUFS,
+                return STATUS_ERROR, "RX queue threshold must be below ring size and dataplane mbuf count");
+    for (uint16_t i = 0; i < config->slot_count; i++) {
+        const UpfWorkerSlotConfig *slot = &config->slots[i];
+        UTLT_Assert(slot->service_id < MAX_SERVICES && slot->service_id < g_upf_workers->service_limit &&
+                    slot->service_id < service_mz->len / sizeof(*service_counts) &&
+                    slot->service_id != UPF_C_SERVICE_ID && !service_counts[slot->service_id],
+                    return STATUS_ERROR, "Slot %u service is reserved, occupied or outside manager limits", i);
+        UTLT_Assert(slot->n3_port < RTE_MAX_ETHPORTS && slot->n6_port < RTE_MAX_ETHPORTS &&
+                    manager_ports->init[slot->n3_port] && manager_ports->init[slot->n6_port],
+                    return STATUS_ERROR, "Slot %u requires manager-initialized N3/N6 ports", i);
+        UTLT_Assert(slot->core < core_mz->len / sizeof(*manager_cores) && manager_cores[slot->core].enabled &&
+                    !manager_cores[slot->core].is_dedicated_core && !manager_cores[slot->core].nf_count,
+                    return STATUS_ERROR, "Slot %u core is unavailable or not enabled for NFs", i);
+    }
+    UTLT_Assert(UpfWorkerRegistryPublish(config) == 0, return STATUS_ERROR,
+                "Cannot publish worker slots; restart manager/UPF-C between configurations");
+    UTLT_Info("Configured %u worker slots (min=%u max=%u RX threshold=%u); all slots are INACTIVE",
+               config->slot_count, config->min_workers, config->max_workers, config->rx_queue_threshold);
     return STATUS_OK;
 }
 
@@ -265,6 +303,14 @@ Status UpfConfigParse() {
                 } else if (!strcmp(upfKey, "upf_u_workers")) {
                     UTLT_Assert(ParseWorkers(&upfIter) == STATUS_OK, return STATUS_ERROR,
                                 "Invalid upf_u_workers configuration");
+                } else if (!strcmp(upfKey, "scaling")) {
+                    YamlIter scaling;
+                    char error[256];
+                    UTLT_Assert(!Self()->scaling.slot_count, return STATUS_ERROR, "Duplicate scaling configuration");
+                    YamlIterChild(&upfIter, &scaling);
+                    UTLT_Assert(UpfScalingConfigParse(document, scaling.node, &Self()->scaling,
+                                                     error, sizeof(error)) == 0,
+                                return STATUS_ERROR, "Invalid scaling configuration: %s", error);
                 } else if (!strcmp(upfKey, "dataplane_ports")) {
                     YamlIter portIter;
                     YamlIterChild(&upfIter, &portIter);
@@ -349,8 +395,8 @@ Status UpfConfigParse() {
     }
 
     DeleteYamlDocument();
-    
-    return STATUS_OK;
+
+    return PublishWorkerSlots();
 }
 
 static int SetProtocolIter(YamlIter *protoList, YamlIter *protoIter) {
