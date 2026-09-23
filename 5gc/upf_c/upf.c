@@ -40,6 +40,7 @@
 
 #include "upf_cls_ctrl.h"
 #include "upf_sess_buf.h"
+#include "upf_scaling.h"
 
 #define NF_TAG "upf_c"
 
@@ -62,6 +63,7 @@ int main(int argc, char *argv[]) {
     nf_function_table = onvm_nflib_init_nf_function_table();
     nf_function_table->pkt_handler = packet_handler;
     nf_function_table->msg_handler = msg_handler;
+    nf_function_table->user_actions = UpfControlLoop;
 
     if ((arg_offset = onvm_nflib_init(argc, argv, NF_TAG, nf_local_ctx, nf_function_table)) < 0) {
         onvm_nflib_stop(nf_local_ctx);
@@ -101,9 +103,11 @@ int main(int argc, char *argv[]) {
     status = UpfInit();
     UTLT_Assert(status == STATUS_OK, return STATUS_ERROR,
                 "UPF failed to initialize");
+    if (UpfScalingInit() < 0) rte_exit(EXIT_FAILURE, "Cannot initialize UPF scaling controller\n");
 
     onvm_nflib_run(nf_local_ctx);
 
+    UpfScalingStop();
     onvm_nflib_stop(nf_local_ctx);
 
     status = UpfTerm();

@@ -27,6 +27,7 @@ typedef struct _PfcpXact {
     PfcpNode    *gnode;
 
     int         step;               // 1: Init, 2: Trigger, 3: Trigger Reply
+    uint8_t     applicationPending; // Keep remote request while async admission completes.
     struct {
         uint8_t type;
         Bufblk  *bufBlk;

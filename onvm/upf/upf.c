@@ -29,7 +29,7 @@
 #define UEIP_TO_HASH_KEY(x) (DEFAULT_HASH_FUNC(&x, sizeof(uint32_t), 0))
 
 #define NO_FLAGS 0
-#define MAX_NUM_OF_USERS 1024
+#define MAX_NUM_OF_USERS UPF_MAX_SESSION_RULES
 #define MZ_TEID_TO_UPF_SESSION_MAP_INFO  "MProc_TeidToUpfSessionMap_info"
 #define MZ_UE_IP_TO_UPF_SESSION_MAP_INFO "MProc_UeIpToUpfSessionMap_info"
 #define MZ_PFCP_SESSION_TABLE_INFO "MProc_pfcp_session_table_info"

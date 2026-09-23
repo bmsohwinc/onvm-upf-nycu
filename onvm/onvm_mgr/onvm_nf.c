@@ -209,18 +209,18 @@ onvm_nf_check_status(void) {
                                 break;
                         case MSG_NF_STARTING:
                                 nf_init_cfg = (struct onvm_nf_init_cfg *)msg->msg_data;
-                                rte_spinlock_lock(&onvm_upf_lock);
+                                onvm_upf_nf_lock();
                                 nf_result = onvm_nf_start(nf_init_cfg);
-                                rte_spinlock_unlock(&onvm_upf_lock);
+                                onvm_upf_nf_unlock();
                                 if (nf_result == 0) {
                                         onvm_stats_gen_event_nf_info("NF Starting", &nfs[nf_init_cfg->instance_id]);
                                 }
                                 break;
                         case MSG_NF_READY:
                                 nf = (struct onvm_nf *)msg->msg_data;
-                                rte_spinlock_lock(&onvm_upf_lock);
+                                onvm_upf_nf_lock();
                                 nf_result = onvm_nf_ready(nf);
-                                rte_spinlock_unlock(&onvm_upf_lock);
+                                onvm_upf_nf_unlock();
                                 if (nf_result == 0) {
                                         onvm_stats_gen_event_nf_info("NF Ready", nf);
                                 }
@@ -232,9 +232,9 @@ onvm_nf_check_status(void) {
 
                                 /* Saved as onvm_nf_stop frees the memory */
                                 stop_nf_id = nf->instance_id;
-                                rte_spinlock_lock(&onvm_upf_lock);
+                                onvm_upf_nf_lock();
                                 nf_result = onvm_nf_stop(nf);
-                                rte_spinlock_unlock(&onvm_upf_lock);
+                                onvm_upf_nf_unlock();
                                 if (nf_result == 0) {
                                         onvm_stats_gen_event_info("NF Stopping", ONVM_EVENT_NF_STOP, &stop_nf_id);
                                 }

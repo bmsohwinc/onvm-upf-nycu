@@ -34,6 +34,7 @@
 #include "pfcp_xact.h"
 #include "pfcp_convert.h"
 #include "n4_onvm_pfcp_build.h"
+#include "n4_onvm_pfcp_handler.h"
 #include "upf_events.h"
 #include "upf_cls_ctrl.h"
 
@@ -334,7 +335,9 @@ bool UpfClsRebuildAndPublish(uint32_t *out_version) {
         rte_free(entry);
     }
 
-    if (Self()->workerCount) {
+    if (Self()->scaling.slot_count) {
+        /* Dynamic readers observe the shared version even while idle. */
+    } else if (Self()->workerCount) {
         for (uint16_t i = 0; i < Self()->workerCount; i++)
             UpfSendEvt1(Self()->workers[i].service_id, EVT_CLS_GC_REQ, (uintptr_t)ver);
     } else {
@@ -367,12 +370,32 @@ void UpfClsOnAckFree(uint32_t ver, uint16_t service_id) {
         return;
     if (ver > g_cls_acked[service_id]) g_cls_acked[service_id] = ver;
 
-    uint32_t safe_ver = g_cls_acked[UPF_U_SERVICE_ID];
-    if (Self()->workerCount) {
-        safe_ver = UINT32_MAX;
-        for (uint16_t i = 0; i < Self()->workerCount; i++)
-            safe_ver = RTE_MIN(safe_ver, g_cls_acked[Self()->workers[i].service_id]);
+    UpfClsCollect();
+}
+
+uint32_t UpfClsSafeVersion(void) {
+    if (Self()->scaling.slot_count) {
+        uint32_t safe = __atomic_load_n(&g_upf_cls_ctrl->version, __ATOMIC_ACQUIRE);
+        for (uint16_t i = 0; i < Self()->scaling.slot_count; i++) {
+            const UpfWorkerRuntime *r = &g_upf_workers->runtime[i];
+            uint32_t generation = __atomic_load_n(&r->reader_generation, __ATOMIC_ACQUIRE);
+            if (!generation) continue;
+            if (__atomic_load_n(&r->ack_generation, __ATOMIC_ACQUIRE) != generation) return 0;
+            safe = RTE_MIN(safe, __atomic_load_n(&r->ack_version, __ATOMIC_ACQUIRE));
+        }
+        return safe;
     }
+    uint32_t safe = g_cls_acked[UPF_U_SERVICE_ID];
+    if (Self()->workerCount) {
+        safe = UINT32_MAX;
+        for (uint16_t i = 0; i < Self()->workerCount; i++)
+            safe = RTE_MIN(safe, g_cls_acked[Self()->workers[i].service_id]);
+    }
+    return safe;
+}
+
+void UpfClsCollect(void) {
+    uint32_t safe_ver = UpfClsSafeVersion();
     ClsRetired **link = &g_cls_retired;
     while (*link) {
         ClsRetired *entry = *link;
@@ -784,6 +807,7 @@ Status UpfN4HandleCreatePdr(UpfSession *session, CreatePDR *createPdr) {
                 "UpfPDRRegisterToSession failed");
 
     UpfPDRGlobalAdd(upfPdr);
+    if (session->admission_pending) return STATUS_OK;
 
     uint32_t new_ver;
     if (!UpfClsRebuildAndPublish(&new_ver)) {
@@ -1653,13 +1677,12 @@ Status UpfN4HandleRemoveQer(UpfSession *session, uint32_t nQERID) {
     return STATUS_OK;
 }
 
-Status UpfN4HandleSessionEstablishmentRequest(UpfSession *session, PfcpXact *pfcpXact,
-                                              PFCPSessionEstablishmentRequest *request) {
+uint8_t UpfN4InstallSessionRules(UpfSession *session, PFCPSessionEstablishmentRequest *request) {
     Status status;
     uint8_t cause = PFCP_CAUSE_REQUEST_ACCEPTED;
 
-    UTLT_Assert(session, return STATUS_ERROR, "Upf Session error");
-    UTLT_Assert(pfcpXact, return STATUS_ERROR, "pfcpXact error");
+    UTLT_Assert(session, return PFCP_CAUSE_REQUEST_REJECTED, "Upf Session error");
+
     //UTLT_Assert(pfcpXact->gtpBuf, return,
     //  "GTP buffer of pfcpXact error");
     //UTLT_Assert(pfcpXact->gtpXact, return,
@@ -1708,6 +1731,19 @@ Status UpfN4HandleSessionEstablishmentRequest(UpfSession *session, PfcpXact *pfc
         }
     }
 
+    if (cause == PFCP_CAUSE_REQUEST_ACCEPTED && session->admission_pending &&
+        !UpfClsRebuildAndPublish(NULL)) cause = PFCP_CAUSE_NO_RESOURCES_AVAILABLE;
+    return cause;
+}
+
+Status UpfN4HandleSessionEstablishmentRequest(UpfSession *session, PfcpXact *xact,
+                                            PFCPSessionEstablishmentRequest *request) {
+    return UpfN4SendEstablishmentResponse(session, xact, request, UpfN4InstallSessionRules(session, request));
+}
+
+Status UpfN4SendEstablishmentResponse(UpfSession *session, PfcpXact *pfcpXact,
+                                     PFCPSessionEstablishmentRequest *request, uint8_t cause) {
+    Status status;
     PfcpHeader header;
     Bufblk *bufBlk = NULL;
     PfcpFSeid *smfFSeid = NULL;
@@ -1731,8 +1767,11 @@ Status UpfN4HandleSessionEstablishmentRequest(UpfSession *session, PfcpXact *pfc
                 "N4 build error");
 
     status = PfcpXactUpdateTx(pfcpXact, &header, bufBlk);
-    UTLT_Assert(status == STATUS_OK, return STATUS_ERROR,
+    UTLT_Assert(status == STATUS_OK, BufblkFree(bufBlk); return STATUS_ERROR,
                 "pfcpXact update TX error");
+
+    if (cause == PFCP_CAUSE_REQUEST_ACCEPTED)
+        __atomic_store_n(&session->admission_pending, 0, __ATOMIC_RELEASE);
 
     status = PfcpXactCommit(pfcpXact);
     UTLT_Assert(status == STATUS_OK, return STATUS_ERROR,
@@ -1875,10 +1914,6 @@ Status UpfN4HandleSessionDeletionRequest(UpfSession *session, PfcpXact *xact,
     PfcpHeader header;
     Bufblk *bufBlk = NULL;
 
-    /* delete session */
-    UTLT_Assert(UpfSessionRemove(session) == STATUS_OK, return STATUS_ERROR,
-        "UpfSessionRemove failed");
-
     /* Send Session Deletion Response */
     memset(&header, 0, sizeof(PfcpHeader));
 
@@ -1888,6 +1923,11 @@ Status UpfN4HandleSessionDeletionRequest(UpfSession *session, PfcpXact *xact,
     status = UpfN4BuildSessionDeletionResponse(&bufBlk, header.type,
                                                session, request);
     UTLT_Assert(status == STATUS_OK, return STATUS_ERROR, "N4 build error");
+
+    if (!Self()->scaling.slot_count) {
+        UTLT_Assert(UpfSessionRemove(session) == STATUS_OK,
+                    BufblkFree(bufBlk); return STATUS_ERROR, "UpfSessionRemove failed");
+    }
 
     status = PfcpXactUpdateTx(xact, &header, bufBlk);
     UTLT_Assert(status == STATUS_OK, return STATUS_ERROR,
@@ -2062,4 +2102,18 @@ Status UpfN4HandleHeartbeatResponse(PfcpXact *xact,
     // if rsv response, nothing to do, else peer may be not alive
     UTLT_Info("[PFCP] Heartbeat Response");
     return STATUS_OK;
+}
+
+int UpfN4AbortPendingSession(UpfSession *session, uint32_t *version) {
+    for (list_node_t *n = session->pdr_list->head; n; n = n->next) UpfPDRGlobalRemove(n->val);
+    if (UpfClsRebuildAndPublish(version)) return 0;
+    for (list_node_t *n = session->pdr_list->head; n; n = n->next) UpfPDRGlobalAdd(n->val);
+    return -1;
+}
+
+void UpfN4FreePendingSession(UpfSession *session) {
+    list_t *lists[] = {session->pdr_list, session->far_list, session->qer_list};
+    for (unsigned i = 0; i < 3; i++)
+        for (list_node_t *n = lists[i]->head; n; n = n->next) rte_free(n->val);
+    UpfSessionRemove(session);
 }

@@ -188,6 +188,8 @@ static Status PfcpTerm(void *data) {
 }
 
 static Status PacketRecvThreadInit(void *data) {
+    /* Dynamic mode owns timers in its admission event loop. */
+    if (Self()->scaling.slot_count) return STATUS_OK;
     ThreadFuncType threadFuncPtr = data;
     
     UTLT_Assert(ThreadCreate(&Self()->pktRecvThread, threadFuncPtr, NULL) == STATUS_OK,
@@ -197,6 +199,7 @@ static Status PacketRecvThreadInit(void *data) {
 }
 
 static Status PacketRecvThreadTerm(void *data) {
+    if (Self()->scaling.slot_count) return STATUS_OK;
     UTLT_Assert(ThreadDelete(Self()->pktRecvThread) == STATUS_OK,
         return STATUS_ERROR, "");
 

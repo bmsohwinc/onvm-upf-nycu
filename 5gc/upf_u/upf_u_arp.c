@@ -164,7 +164,7 @@ send_arp_request(uint16_t port,
         }
     }
 
-    if (rte_eth_macaddr_get(port, &src_mac) < 0) {
+    if (UpfU_GetMac(port, &src_mac) < 0) {
         UTLT_Error("Failed to get MAC for port %u", port);
         return -1;
     }
@@ -310,7 +310,7 @@ handle_arp_packet(struct rte_mbuf *pkt,
             return 0;
         }
 
-        if (rte_eth_macaddr_get(port, &local_mac) < 0) {
+        if (UpfU_GetMac(port, &local_mac) < 0) {
             UTLT_Error("handle_arp_packet: failed to get local MAC for port=%u", port);
             meta->action = ONVM_NF_ACTION_DROP;
             return 0;
@@ -422,7 +422,7 @@ attach_l2_or_arp(struct rte_mbuf *pkt,
     if (eth_hdr == NULL)
         return -1;
 
-    if (rte_eth_macaddr_get(out_port, &local_mac) < 0)
+    if (UpfU_GetMac(out_port, &local_mac) < 0)
         return -1;
 
     rte_ether_addr_copy(&local_mac, &eth_hdr->src_addr);

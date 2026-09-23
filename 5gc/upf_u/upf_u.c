@@ -79,11 +79,38 @@ typedef struct {
 
 static upf_cls_local_t g_cls_local = {0};
 static uint16_t g_upfu_service_id = UPF_U_SERVICE_ID;
+static int g_worker_slot = -1;
+static uint32_t g_worker_generation;
+
+static int ConfigureWorkerSlot(struct onvm_nf *nf) {
+    if (UpfWorkerRegistryAttach() < 0 || !UpfWorkerRegistryIsConfigured()) return 0;
+    for (uint16_t i = 0; i < g_upf_workers->config.slot_count; i++) {
+        const UpfWorkerSlotConfig *s = &g_upf_workers->config.slots[i];
+        if (s->service_id != nf->service_id) continue;
+        UpfWorkerRuntime *r = &g_upf_workers->runtime[i];
+        if (__atomic_load_n(&r->state, __ATOMIC_ACQUIRE) != UPF_WORKER_STARTING ||
+            s->core != nf->thread_info.core || !r->generation ||
+            __atomic_load_n(&r->reader_generation, __ATOMIC_ACQUIRE) != r->generation)
+            return -1;
+        g_worker_slot = i;
+        g_worker_generation = r->generation;
+        g_n3_port = s->n3_port; g_n6_port = g_sgi_port = s->n6_port;
+        g_n3_ip_be = s->n3_addr.s_addr; g_n6_ip_be = s->n6_addr.s_addr;
+        g_an_peer_n3_ip_be = g_upf_workers->config.n3_peer_addr.s_addr;
+        g_dn_peer_n6_ip_be = g_upf_workers->config.n6_peer_addr.s_addr;
+        g_nat_enabled = 0;
+        return 1;
+    }
+    return -1;
+}
 
 // Flip to the latest published snapshot (called at burst boundary)
 static inline void
 UpfClsMaybeFlipAndAck(void) {
     if (!g_upf_cls_ctrl)
+        return;
+    if (g_worker_slot >= 0 && __atomic_load_n(
+            &g_upf_workers->runtime[g_worker_slot].reader_generation, __ATOMIC_ACQUIRE) != g_worker_generation)
         return;
     /* Also observe publication while idle or if a notification was lost. */
     if (likely(!g_cls_local.flip_pending &&
@@ -124,7 +151,12 @@ UpfClsMaybeFlipAndAck(void) {
     g_cls_local.ver  = v2;
     g_cls_local.flip_pending = 0;
 
-    if (UpfSendEvt2(UPF_C_SERVICE_ID, EVT_CLS_GC_ACK, (uintptr_t)v2,
+    if (g_worker_slot >= 0) {
+        UpfWorkerRuntime *r = &g_upf_workers->runtime[g_worker_slot];
+        __atomic_store_n(&r->ack_version, v2, __ATOMIC_RELEASE);
+        __atomic_store_n(&r->ack_generation, g_worker_generation, __ATOMIC_RELEASE);
+        g_cls_local.acked_ver = v2;
+    } else if (UpfSendEvt2(UPF_C_SERVICE_ID, EVT_CLS_GC_ACK, (uintptr_t)v2,
                     (uintptr_t)g_upfu_service_id) >= 0)
         g_cls_local.acked_ver = v2;
 }
@@ -513,6 +545,7 @@ HandlePacketWithFar(struct rte_mbuf *pkt, UPDK_FAR *far, UPDK_QER *qer,
 
 static bool
 UpfSessionIsLocal(const UpfSession *session, const struct onvm_nf *nf) {
+    if (!session || __atomic_load_n(&session->admission_pending, __ATOMIC_ACQUIRE)) return false;
     const UpfWorker *worker = &session->worker;
     if (!worker->service_id) return true;  /* Existing single-UPF-U mode */
     return worker->service_id == nf->service_id &&
@@ -1071,8 +1104,9 @@ main(int argc, char *argv[]) {
         config_path = argv[arg_offset + 1];
     }
 
-    printf("[UPF-U] Using config: %s\n", config_path);
-    if (UpfU_LoadAndParseConfig(config_path) != 0) {
+    int slot_config = ConfigureWorkerSlot(nf_local_ctx->nf);
+    if (slot_config < 0) rte_exit(EXIT_FAILURE, "UPF-U slot was not registered by UPF-C\n");
+    if (!slot_config && UpfU_LoadAndParseConfig(config_path) != 0) {
         rte_exit(EXIT_FAILURE, "Failed to load/parse UPF-U YAML config.\n");
     }
 
@@ -1111,6 +1145,13 @@ main(int argc, char *argv[]) {
 
     if (upf_u_shaper_init(nf_local_ctx->nf) < 0) {
         rte_exit(EXIT_FAILURE, "Failed to init UPF-U shaper entry pool.\n");
+    }
+
+    if (g_worker_slot >= 0) {
+        uint32_t empty = 0;
+        if (!__atomic_compare_exchange_n(&g_upf_workers->runtime[g_worker_slot].registered_instance,
+                &empty, nf_local_ctx->nf->instance_id, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            rte_exit(EXIT_FAILURE, "UPF-U slot already has a registered process\n");
     }
 
     onvm_nflib_run(nf_local_ctx);

@@ -6,19 +6,45 @@ baseline `fa54111` through `6b91f82`, and the single companion SMF commit
 for commands, configs and the three-node test procedure.
 
 The current model has one UPF-C assigning sessions to configured UPF-U
-workers. The manager polls all enabled N3/N6 VFs, dispatches packets to each
+workers. The manager polls active N3/N6 VFs, dispatches packets to each
 worker's RX ring by ingress port ID, and transmits packets from NF TX rings.
 UPF-U uses rings for all packet I/O. Static mode uses a manager-local service
 map; dynamic mode uses the configured slot pool and acknowledged poll updates.
 
-Dynamic scale-out is being implemented in reviewed phases. The
-[configuration/registry and manager activation phases](../dynamic-scaling.md)
-add an opt-in worker-slot configuration with INACTIVE shared state, a
-nonblocking request/ACK API, and exact-instance dispatch. Manager skips each
-inactive slot's VF pair and acknowledges activation of both ports at an RX
-boundary. UPF-C admission/spawning and NIC/DN steering remain subsequent
-phases; dynamic-mode establishments still return NO_RESOURCES_AVAILABLE.
-See [polling validation](../../../tests/worker_polling/README.md) for local checks.
+Dynamic scale-out is implemented through
+[phases 1–4](../dynamic-scaling.md). The opt-in configuration defines a pool of
+precreated VF pairs and dedicated cores. UPF-C starts workers on demand from
+current RX-ring occupancy, assigns multiple sessions per worker with distinct
+TEIDs, and waits for classifier, polling and NIC/DN acknowledgments before
+completing PFCP establishment. The static packet path below remains available.
+
+## Phases 3–4: dynamic admission and steering
+
+- Add `upf_scaling.c`: event-loop startup/admission state, bounded pending PFCP
+  requests, monotonic TEIDs, child reaping and failure rollback. Requests already
+  selected for a worker are not resampled or moved. At the worker limit, new
+  sessions use the least queued ready worker.
+- Register classifier readers before spawn, ACK by slot/generation, and remove
+  membership only after process exit. Inactive slots do not delay reclamation.
+  UPF-U reads shared slot configuration and MACs, so spawning needs no custom YAML
+  or PCI polling. Pending sessions remain blocked until success is cached.
+- Add manager `onvm_upf_steer.c`: validate kernel ixgbe PFs and VF/DPDK identity,
+  install per-worker N3 UDP/2152 and per-UE N6 IPv4 filters through ethtool ioctls,
+  and acknowledge the DN helper's route installation. Devices/VFs are initialized
+  beforehand; PF configuration is not reset at runtime.
+- Add `scripts/upf-dn-route`, installed on CN and DN at the same absolute path.
+  It establishes a UE /32 route through the owner's N6 IP/MAC over SSH, and uses
+  protocol 242 to distinguish routes eligible for failed-establishment rollback.
+- Move dynamic-mode PFCP timers into the UPF-C event loop and retain pending transactions for
+  retransmission handling. A shared lock protects NF-ring lifetime during queue
+  reads. Manager handles control requests separately from statistics timing.
+- Reject dynamic-mode session deletion; teardown and migration remain outside
+  this phase. Failed-establishment cleanup reserves resources if DN state is uncertain.
+- Bump registry ABI to 3 and update the shared session/PFCP structures: rebuild
+  and restart manager and all NFs together. See the dynamic guide for configuration,
+  failure limits, prerequisites and remaining Linux/hardware verification.
+
+No tests were added for these phases, per request. Phase 5 is testbed verification.
 
 ## Static packet path: manager polling and ring transport
 

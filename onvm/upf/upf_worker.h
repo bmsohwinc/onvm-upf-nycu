@@ -13,7 +13,8 @@ extern "C" {
 #define UPF_MAX_WORKERS 32
 #define UPF_WORKER_PATH_LEN 512
 #define MZ_UPF_WORKERS "UPF_WORKERS"
-#define UPF_WORKERS_ABI_VERSION 2
+#define UPF_WORKERS_ABI_VERSION 3
+#define UPF_MAX_SESSION_RULES 1024
 
 /* A configured slot reserves resources; its array index is the slot ID.
  * Ports are DPDK port IDs. VF indices are relative to their respective PF.
@@ -40,6 +41,13 @@ typedef struct {
     char worker_binary[UPF_WORKER_PATH_LEN];
     char n3_pf[IF_NAMESIZE];
     char n6_pf[IF_NAMESIZE];
+    char file_prefix[64];        /* Same EAL namespace as manager and UPF-C. */
+    char dn_route_helper[UPF_WORKER_PATH_LEN];
+    char dn_host[128];           /* SSH destination; helper is installed on both hosts. */
+    char dn_interface[IF_NAMESIZE];
+    struct in_addr n3_peer_addr;
+    struct in_addr n6_peer_addr;
+    uint32_t startup_timeout_ms;
     UpfWorkerSlotConfig slots[UPF_MAX_WORKERS];
 } UpfScalingConfig;
 
@@ -54,6 +62,10 @@ typedef struct {
     uint32_t state;              /* Atomic publication point; UPF-C is sole writer. */
     uint32_t generation;         /* Distinguishes successive starts of a slot. */
     uint16_t instance_id;        /* Assigned by manager; zero until registered. */
+    uint32_t reader_generation;  /* UPF-C registers before spawn; clears only after exit. */
+    uint32_t registered_instance;/* UPF-U publishes after attaching its slot. */
+    uint32_t ack_version;        /* UPF-U publishes at a classifier quiescent point. */
+    uint32_t ack_generation;
 } UpfWorkerRuntime;
 
 typedef struct {
@@ -63,11 +75,27 @@ typedef struct {
     uint8_t enable;              /* Zero disables polling for rollback. */
 } UpfWorkerPollUpdate;
 
+typedef enum {
+    UPF_STEER_PROBE = 1,
+    UPF_STEER_N3_ADD,
+    UPF_STEER_SESSION_ADD,
+    UPF_STEER_SESSION_DEL,       /* Roll back a failed establishment only. */
+} UpfSteerOperation;
+
+typedef struct {
+    uint32_t operation;
+    uint32_t generation;
+    uint32_t session_index;
+    uint16_t slot;
+    struct in_addr ue_addr;     /* Network byte order. */
+} UpfSteerUpdate;
+
 /* Manager creates the registry. UPF-C publishes configuration once per run.
  * The shared structures contain values only, never process-private pointers.
- * Readers must acquire configured before accessing config. UPF-C owns runtime;
- * manager owns polling_status and the ACK. The mailbox has one UPF-C producer
- * and one manager RX consumer, with at most one outstanding request.
+ * Readers must acquire configured before accessing config. UPF-C owns runtime
+ * except the worker registration/ACK fields. Manager RX owns polling_status and
+ * polling ACKs; manager master owns steering ACKs. Each mailbox has one UPF-C
+ * producer and at most one outstanding request.
  */
 typedef struct {
     uint32_t abi_version;
@@ -80,6 +108,11 @@ typedef struct {
     uint32_t poll_request_seq;   /* Release publishes request fields. */
     int32_t poll_result;         /* 0 success or negative errno. */
     uint32_t poll_ack_seq;       /* Release publishes result and applied map. */
+    uint32_t nf_lock;            /* Protects NF/ring lifetime during UPF-C queue reads. */
+    UpfSteerUpdate steer_request;
+    uint32_t steer_request_seq;
+    int32_t steer_result;
+    uint32_t steer_ack_seq;
 } UpfWorkerRegistry;
 
 extern UpfWorkerRegistry *g_upf_workers;
@@ -93,6 +126,15 @@ int UpfWorkerRegistryPublish(const UpfScalingConfig *config); /* UPF-C only. */
  */
 int UpfWorkerPollRequest(const UpfWorkerPollUpdate *update, uint32_t *sequence);
 int UpfWorkerPollResult(uint32_t sequence, int32_t *result); /* -EINPROGRESS while pending. */
+int UpfSteerRequest(const UpfSteerUpdate *update, uint32_t *sequence);
+int UpfSteerResult(uint32_t sequence, int32_t *result);
+
+static inline int UpfWorkerNfTryLock(void) {
+    return g_upf_workers && !__atomic_exchange_n(&g_upf_workers->nf_lock, 1, __ATOMIC_ACQUIRE);
+}
+static inline void UpfWorkerNfUnlock(void) {
+    __atomic_store_n(&g_upf_workers->nf_lock, 0, __ATOMIC_RELEASE);
+}
 
 static inline int UpfWorkerPollingStatus(void) {
     return g_upf_workers ? __atomic_load_n(&g_upf_workers->polling_status, __ATOMIC_ACQUIRE) : 0;

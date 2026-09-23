@@ -27,27 +27,35 @@
 extern "C" {
 #endif /* __cplusplus */
 
-void UpfN4HandleCreatePdr(UpfSession *session, CreatePDR *createPdr);
-void UpfN4HandleCreateFar(UpfSession *session, CreateFAR *createFar);
-void UpfN4HandleCreateQer(UpfSession *session, CreateQER *createQER);
-void UpfN4HandleUpdatePdr(UpfSession *session, UpdatePDR *updatePdr);
-void UpfN4HandleUpdateFar(UpfSession *session, UpdateFAR *updateFar);
-void UpfN4HandleUpdateQer(UpfSession *session, UpdateQER *updateQer);
+Status UpfN4HandleCreatePdr(UpfSession *session, CreatePDR *createPdr);
+Status UpfN4HandleCreateFar(UpfSession *session, CreateFAR *createFar);
+Status UpfN4HandleCreateQer(UpfSession *session, CreateQER *createQER);
+Status UpfN4HandleUpdatePdr(UpfSession *session, UpdatePDR *updatePdr);
+Status UpfN4HandleUpdateFar(UpfSession *session, UpdateFAR *updateFar);
+Status UpfN4HandleUpdateQer(UpfSession *session, UpdateQER *updateQer);
 Status UpfN4HandleRemovePdr(UpfSession *session, uint16_t nPDRID);
 Status UpfN4HandleRemoveFar(UpfSession *session, uint32_t nFARID);
 Status UpfN4HandleRemoveQer(UpfSession *session, uint32_t nQERID);
-void UpfN4HandleSessionEstablishmentRequest(
+Status UpfN4HandleSessionEstablishmentRequest(
         UpfSession *session, PfcpXact *pfcpXact, PFCPSessionEstablishmentRequest *request);
-void UpfN4HandleSessionModificationRequest(
+Status UpfN4HandleSessionModificationRequest(
         UpfSession *session, PfcpXact *xact, PFCPSessionModificationRequest *request);
-void UpfN4HandleSessionDeletionRequest(UpfSession *session, PfcpXact *xact, PFCPSessionDeletionRequest *request);
-void UpfN4HandleSessionReportResponse(
+Status UpfN4HandleSessionDeletionRequest(UpfSession *session, PfcpXact *xact, PFCPSessionDeletionRequest *request);
+Status UpfN4HandleSessionReportResponse(
         UpfSession *session, PfcpXact *xact, PFCPSessionReportResponse *response);
-void UpfN4HandleAssociationSetupRequest(PfcpXact *xact, PFCPAssociationSetupRequest *request);
-void UpfN4HandleAssociationUpdateRequest(PfcpXact *xact, PFCPAssociationUpdateRequest *request);
-void UpfN4HandleAssociationReleaseRequest(PfcpXact *xact, PFCPAssociationReleaseRequest *request);
-void UpfN4HandleHeartbeatRequest(PfcpXact *xact, HeartbeatRequest *request);
-void UpfN4HandleHeartbeatResponse(PfcpXact *xact, HeartbeatResponse *response);
+Status UpfN4HandleAssociationSetupRequest(PfcpXact *xact, PFCPAssociationSetupRequest *request);
+Status UpfN4HandleAssociationUpdateRequest(PfcpXact *xact, PFCPAssociationUpdateRequest *request);
+Status UpfN4HandleAssociationReleaseRequest(PfcpXact *xact, PFCPAssociationReleaseRequest *request);
+Status UpfN4HandleHeartbeatRequest(PfcpXact *xact, HeartbeatRequest *request);
+Status UpfN4HandleHeartbeatResponse(PfcpXact *xact, HeartbeatResponse *response);
+uint32_t UpfClsSafeVersion(void);
+void UpfClsCollect(void);
+bool UpfClsRebuildAndPublish(uint32_t *version);
+uint8_t UpfN4InstallSessionRules(UpfSession *session, PFCPSessionEstablishmentRequest *request);
+Status UpfN4SendEstablishmentResponse(UpfSession *session, PfcpXact *xact,
+    PFCPSessionEstablishmentRequest *request, uint8_t cause);
+int UpfN4AbortPendingSession(UpfSession *session, uint32_t *version);
+void UpfN4FreePendingSession(UpfSession *session);
 void UpfClsOnAckFree(uint32_t ver, uint16_t service_id);
 
 #ifdef __cplusplus

@@ -8,6 +8,7 @@
 #include <rte_memzone.h>
 
 UpfWorkerRegistry *g_upf_workers;
+static uint32_t steer_consumed;
 
 int UpfWorkerRegistryCreate(uint16_t service_limit) {
     if (rte_eal_process_type() != RTE_PROC_PRIMARY)
@@ -68,6 +69,31 @@ int UpfWorkerRegistryAttach(void) {
     if (registry->abi_version != UPF_WORKERS_ABI_VERSION)
         return -EPROTO;
     g_upf_workers = registry;
+    return 0;
+}
+
+int UpfSteerRequest(const UpfSteerUpdate *update, uint32_t *sequence) {
+    if (!UpfWorkerRegistryIsConfigured()) return -ENOENT;
+    if (!update || !sequence || update->operation < UPF_STEER_PROBE ||
+        update->operation > UPF_STEER_SESSION_DEL || update->slot >= g_upf_workers->config.slot_count)
+        return -EINVAL;
+    uint32_t previous = __atomic_load_n(&g_upf_workers->steer_request_seq, __ATOMIC_RELAXED);
+    if (previous != steer_consumed) return -EBUSY;
+    if (__atomic_load_n(&g_upf_workers->steer_ack_seq, __ATOMIC_ACQUIRE) != previous) return -EBUSY;
+    if (previous == UINT32_MAX) return -EOVERFLOW;
+    g_upf_workers->steer_request = *update;
+    *sequence = previous + 1;
+    __atomic_store_n(&g_upf_workers->steer_request_seq, *sequence, __ATOMIC_RELEASE);
+    return 0;
+}
+
+int UpfSteerResult(uint32_t sequence, int32_t *result) {
+    if (!g_upf_workers) return -ENOENT;
+    if (!sequence || !result) return -EINVAL;
+    if (__atomic_load_n(&g_upf_workers->steer_request_seq, __ATOMIC_RELAXED) != sequence) return -ESTALE;
+    if (__atomic_load_n(&g_upf_workers->steer_ack_seq, __ATOMIC_ACQUIRE) != sequence) return -EINPROGRESS;
+    *result = g_upf_workers->steer_result;
+    steer_consumed = sequence;
     return 0;
 }
 

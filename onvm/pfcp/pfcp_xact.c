@@ -640,6 +640,11 @@ Status PfcpXactTimeout(uint32_t index, uint32_t event, uint8_t *type) {
     UTLT_Assert(type, goto out, "type error");
     *type = xact->seq[xact->step-1].type;
 
+    if (xact->applicationPending && event == globalHoldingEvent) {
+        if (xact->timerHolding) TimerStart(xact->timerHolding);
+        return STATUS_OK;
+    }
+
     if (event == globalResponseEvent) {
         UTLT_Trace("[%d] %s Response Timeout for step %d type %d peer [%s]:%d\n",
                    xact->transactionId, xact->origin == PFCP_LOCAL_ORIGINATOR ?

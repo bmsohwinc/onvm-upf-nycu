@@ -25,9 +25,11 @@
 #include "pfcp_path.h"
 #include "n4_onvm_pfcp_build.h"
 #include "upf_context.h"
+#include "upf_scaling.h"
+#include "n4_dispatcher.h"
 #include <rte_byteorder.h>
 
-static void RejectSessionEstablishment(PfcpMessage *message, PfcpXact *xact, uint8_t cause) {
+void UpfRejectSessionEstablishment(PfcpMessage *message, PfcpXact *xact, uint8_t cause) {
     PFCPSessionEstablishmentRequest *request = &message->pFCPSessionEstablishmentRequest;
     PfcpHeader header = {0};
     header.type = PFCP_SESSION_ESTABLISHMENT_RESPONSE;
@@ -124,10 +126,20 @@ void UpfDispatcher(const Event *event) {
                 UTLT_Assert(status == STATUS_OK, goto freeBuf, "PFCP transaction receive failed");
 
                 if (!session) {
+                    if (Self()->scaling.slot_count && pfcpMessage->header.type == PFCP_SESSION_ESTABLISHMENT_REQUEST) {
+                        if (UpfScalingEnqueue(bufBlk, xact) == 0) {
+                            /* Pending admission owns the parsed IEs, independently of recvBufBlk. */
+                            pfcpMessage = NULL;
+                            bufBlk = NULL;
+                        } else {
+                            UpfRejectSessionEstablishment(pfcpMessage, xact, PFCP_CAUSE_NO_RESOURCES_AVAILABLE);
+                        }
+                        goto freeBuf;
+                    }
                     uint8_t cause;
                     session = UpfSessionAddByMessage(pfcpMessage, &cause);
                     if (!session) {
-                        RejectSessionEstablishment(pfcpMessage, xact, cause);
+                        UpfRejectSessionEstablishment(pfcpMessage, xact, cause);
                         goto freeBuf;
                     }
                 }
@@ -190,8 +202,8 @@ void UpfDispatcher(const Event *event) {
                 UTLT_Error("No implement pfcp type: %d", pfcpMessage->header.type);
             }
             freeBuf:
-                PfcpStructFree(pfcpMessage);
-                BufblkFree(bufBlk);
+                if (pfcpMessage) PfcpStructFree(pfcpMessage);
+                if (bufBlk) BufblkFree(bufBlk);
                 BufblkFree(recvBufBlk);
             break;
         }

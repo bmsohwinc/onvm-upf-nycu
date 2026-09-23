@@ -65,7 +65,7 @@ typedef struct {
     uint16_t n3_port;
     uint16_t n6_port;
     struct in_addr n3_addr;
-    uint32_t ul_teid;             // Static uplink TEID, host byte order
+    uint32_t ul_teid;             // Session uplink TEID, host byte order
 } UpfWorker;
 
 typedef struct {
@@ -170,6 +170,7 @@ typedef struct _UpfSession {
     list_t          *far_list;
     list_t          *qer_list;
 
+    uint32_t admission_pending; /* Atomic: UPF-U drops until establishment commits. */
     bool srr_flag;
 } UpfSession;
 
@@ -221,6 +222,7 @@ void DumpUpfSession();
 // Create Session APIs
 UpfSession *UpfSessionAlloc(uint64_t seid);
 UpfSession *UpfSessionAddByMessage(PfcpMessage *message, uint8_t *cause);
+UpfSession *UpfSessionAddByMessageForWorker(PfcpMessage *message, uint8_t *cause, const UpfWorker *selected);
 Status InsertUEIPtoSessionMap(const uint32_t ue_ip, UpfSession *session);
 Status InsertTEIDtoSessionMap(const uint32_t teid, UpfSession *session);
 

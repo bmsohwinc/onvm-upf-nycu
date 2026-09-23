@@ -75,7 +75,7 @@ msg_handler(void *msg_data, struct onvm_nf_local_ctx *nf_local_ctx) {
     //event.arg1 = msg->pdrId;
 
     UpfDispatcher(&event);
-
+    rte_free(msg);
 }
 
 int packet_handler(

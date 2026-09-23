@@ -2,6 +2,9 @@
 
 For the implementation rationale and file references across both repositories,
 see the [UPF scaling change summary](changes/README.md).
+For load-driven spawning and multiple sessions per worker, use the
+[dynamic scaling setup](dynamic-scaling.md); the static worker launch and
+static filter commands below are replaced by that workflow.
 
 This guide adapts the original three-node Fabric deployment to CloudLab:
 node1 runs UE/gNB, node2 runs ONVM and the control NFs, and node3 runs the DN.

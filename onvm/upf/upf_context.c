@@ -378,6 +378,7 @@ UpfSession *UpfSessionAdd(PfcpUeIpAddr *ueIp,
     // DumpUpfSession();
     //use to check srr flag
     session->srr_flag = false;
+    session->admission_pending = Self()->scaling.slot_count != 0;
 
     session->teid = teid_key;
     session->pdn.paa.pdnType = pdnType;
@@ -425,13 +426,14 @@ Status UpfSessionRemove(UpfSession *session) {
         UpfSessBufRingDestroy(session->index);
     }
 
-    if (!session->far_list) {
+    if (session->far_list) {
         list_destroy(session->far_list);
     }
 
-    if (!session->pdr_list) {
+    if (session->pdr_list) {
         list_destroy(session->pdr_list);
     }
+    if (session->qer_list) list_destroy(session->qer_list);
     UeIpToUpfSessionMapFree(session->ueIpv4.addr4.s_addr);
     TeidToUpfSessionMapFree(session->teid);
     UpfSessionFree(session);
@@ -439,10 +441,11 @@ Status UpfSessionRemove(UpfSession *session) {
 }
 
 UpfSession *UpfSessionAddByMessage(PfcpMessage *message, uint8_t *cause) {
-    /* Slot configuration is available before dynamic placement is wired in.
-     * Never let an inactive pool fall through to legacy session allocation.
-     */
-    if (Self()->scaling.slot_count) {
+    return UpfSessionAddByMessageForWorker(message, cause, NULL);
+}
+
+UpfSession *UpfSessionAddByMessageForWorker(PfcpMessage *message, uint8_t *cause, const UpfWorker *selected) {
+    if (Self()->scaling.slot_count && !selected) {
         *cause = PFCP_CAUSE_NO_RESOURCES_AVAILABLE;
         return NULL;
     }
@@ -487,15 +490,15 @@ UpfSession *UpfSessionAddByMessage(PfcpMessage *message, uint8_t *cause) {
     bool choose = input->ch;
     PfcpFTeid resolved = {0};
     *cause = PFCP_CAUSE_INVALID_F_TEID_ALLOCATION_OPTION;
-    UTLT_Assert(input->v4 && !input->v6 && choose == (Self()->workerCount != 0),
+    UTLT_Assert(input->v4 && !input->v6 && choose == (Self()->workerCount != 0 || selected != NULL),
                 return NULL, "Worker mode requires CH=1 IPv4; legacy mode requires an explicit IPv4 F-TEID");
     if (choose) {
         UTLT_Assert(fteid_count == 1, return NULL, "Worker demo supports one N3 F-TEID per session");
         *cause = PFCP_CAUSE_INVALID_LENGTH;
         UTLT_Assert(ie->len == 1 + input->chid, return NULL, "Invalid CH F-TEID length");
         *cause = PFCP_CAUSE_NO_RESOURCES_AVAILABLE;
-        UTLT_Assert(Self()->nextWorker < Self()->workerCount, return NULL, "No unused UPF-U worker");
-        const UpfWorker *worker = &Self()->workers[Self()->nextWorker];
+        UTLT_Assert(selected || Self()->nextWorker < Self()->workerCount, return NULL, "No unused UPF-U worker");
+        const UpfWorker *worker = selected ? selected : &Self()->workers[Self()->nextWorker];
         resolved.v4 = 1;
         resolved.teid = rte_cpu_to_be_32(worker->ul_teid);
         resolved.addr4 = worker->n3_addr;
@@ -524,6 +527,7 @@ UpfSession *UpfSessionAddByMessage(PfcpMessage *message, uint8_t *cause) {
         if (replacement) UTLT_Free(replacement);
         return NULL;
     }
+    if (selected) session->worker = *selected;
     session->smfSeid = rte_be_to_cpu_64(((PfcpFSeid *)request->cPFSEID.value)->seid);
     uint16_t pdr_id;
     memcpy(&pdr_id, uplink->pDRID.value, sizeof(pdr_id));

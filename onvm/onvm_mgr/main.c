@@ -101,11 +101,17 @@ master_thread_main(void) {
         sleep(5);
 
         onvm_stats_init(verbosity_level);
-        /* Loop forever: sleep always returns 0 or <= param */
-        while (main_keep_running && sleep(sleeptime) <= sleeptime) {
+        uint64_t last_stats = rte_get_timer_cycles();
+        while (main_keep_running) {
                 onvm_nf_check_status();
-                if (stats_destination != ONVM_STATS_NONE)
-                        onvm_stats_display_all(sleeptime, verbosity_level);
+                onvm_upf_steer_poll();
+                uint64_t now = rte_get_timer_cycles();
+                if (now - last_stats >= RTE_MAX(sleeptime, 1u) * rte_get_timer_hz()) {
+                    if (stats_destination != ONVM_STATS_NONE)
+                        onvm_stats_display_all(RTE_MAX(sleeptime, 1u), verbosity_level);
+                    last_stats = now;
+                }
+                usleep(1000);
 
                 if (time_to_live && unlikely((rte_get_tsc_cycles() - start_time) * TIME_TTL_MULTIPLIER /
                                              rte_get_timer_hz() >= time_to_live)) {
@@ -124,6 +130,7 @@ master_thread_main(void) {
                 }
         }
 
+        onvm_upf_steer_shutdown();
         /* Close out file references and things */
         onvm_stats_cleanup();
 

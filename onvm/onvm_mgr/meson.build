@@ -5,7 +5,8 @@ sources = files(
     'onvm_nf.c',
     'onvm_pkt.c',
     'onvm_stats.c',
-    'onvm_upf.c'
+    'onvm_upf.c',
+    'onvm_upf_steer.c'
 )
 
 onvm_mgr_include = include_directories('.')

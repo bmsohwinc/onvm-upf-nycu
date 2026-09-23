@@ -51,7 +51,7 @@ RTE_TARGET ?= x86_64-native-linuxapp-gcc
 APP = upf_c
 
 # all source are stored in SRCS-y
-SRCS-y := upf.c upf_init.c n4_onvm_pfcp_path.c upf_config.c upf_worker_config.c n4_onvm_pfcp_handler.c n4_onvm_pfcp_build.c n4_dispatcher.c
+SRCS-y := upf.c upf_init.c n4_onvm_pfcp_path.c upf_config.c upf_worker_config.c upf_scaling.c n4_onvm_pfcp_handler.c n4_onvm_pfcp_build.c n4_dispatcher.c
 
 ONVM= $(SRCDIR)/../../onvm
 

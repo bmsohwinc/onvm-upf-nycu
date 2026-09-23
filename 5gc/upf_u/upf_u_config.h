@@ -47,5 +47,6 @@ UpfU_LoadAndParseConfig(const char *path);
 
 void
 init_l2_addrs(void);
+int UpfU_GetMac(uint16_t port, struct rte_ether_addr *address);
 
 #endif

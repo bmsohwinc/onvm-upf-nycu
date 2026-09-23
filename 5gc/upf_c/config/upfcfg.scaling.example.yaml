@@ -1,5 +1,5 @@
-# Phases 1-2: publishes INACTIVE slots; manager stops polling their VF pairs.
-# Dynamic session admission remains unavailable until spawning and steering.
+# Dynamic scale-out for new IPv4 sessions. Manager initializes all VFs first.
+# Install scripts/upf-dn-route on CN and DN at dn_route_helper before starting.
 info:
   version: 1.0.0
   description: UPF-C worker-slot configuration
@@ -17,8 +17,15 @@ configuration:
     max_workers: 2             # Defaults to the number of slots if omitted.
     rx_queue_threshold: 1024   # Packets; evaluated on new-session arrival.
     worker_binary: /absolute/path/to/onvm-upf/build/5gc/l25gc_upf_u
+    file_prefix: rte          # Must match manager and UPF-C EAL --file-prefix.
+    startup_timeout_ms: 30000 # Registration/classifier startup, not a cooldown.
     n3_pf: ens1f0
     n6_pf: ens1f1
+    n3_peer_ip: 192.168.2.2   # gNB next hop
+    n6_peer_ip: 192.168.3.2   # DN next hop
+    dn_route_helper: /usr/local/sbin/upf-dn-route
+    dn_host: cloudlab_user@dn_management_host
+    dn_interface: ens1f0      # Linux DN interface connected to N6
     teid_first: 0x1001         # One distinct TEID per session, across all workers.
     teid_last: 0xffffffff
 

@@ -20,6 +20,7 @@
 #define __N4_DISPATCHER_H__
 
 #include "utlt_event.h"
+#include "pfcp_xact.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -27,6 +28,7 @@ extern "C"
 #endif /* __cplusplus */
 
 void UpfDispatcher(const Event *event);
+void UpfRejectSessionEstablishment(PfcpMessage *message, PfcpXact *xact, uint8_t cause);
 
 #ifdef __cplusplus
 }

@@ -11,6 +11,15 @@
 
 rte_spinlock_t onvm_upf_lock = RTE_SPINLOCK_INITIALIZER;
 
+void onvm_upf_nf_lock(void) {
+    rte_spinlock_lock(&onvm_upf_lock);
+    while (!UpfWorkerNfTryLock()) rte_pause();
+}
+void onvm_upf_nf_unlock(void) {
+    UpfWorkerNfUnlock();
+    rte_spinlock_unlock(&onvm_upf_lock);
+}
+
 static int dynamic_mode;
 static int config_status;
 static uint16_t port_slot[RTE_MAX_ETHPORTS]; /* Slot + 1; zero is an ordinary port. */
@@ -58,6 +67,8 @@ static int apply_update(const UpfWorkerPollUpdate *update) {
         routes[slot].active = 0;
         return 0;
     }
+    if (__atomic_load_n(&g_upf_workers->runtime[slot].state, __ATOMIC_ACQUIRE) == UPF_WORKER_FAILED)
+        return -ECANCELED;
     if (routes[slot].active && !same_start)
         return -EBUSY;
     if (!routes[slot].active && update->generation <= routes[slot].generation)
@@ -89,6 +100,9 @@ void onvm_upf_sync(void) {
     }
     if (config_status != 1)
         return;
+    for (uint16_t i = 0; i < g_upf_workers->config.slot_count; i++)
+        if (__atomic_load_n(&g_upf_workers->runtime[i].state, __ATOMIC_ACQUIRE) == UPF_WORKER_FAILED)
+            routes[i].active = 0;
     uint32_t sequence = __atomic_load_n(&g_upf_workers->poll_request_seq, __ATOMIC_ACQUIRE);
     if (sequence == __atomic_load_n(&g_upf_workers->poll_ack_seq, __ATOMIC_RELAXED))
         return;

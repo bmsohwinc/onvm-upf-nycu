@@ -21,6 +21,8 @@
 #include <string.h>
 #include <ctype.h>
 #include <yaml.h>
+#include <rte_memzone.h>
+#include "onvm_common.h"
 
 #include "upf_u_config.h"
 #include "utlt_debug.h"
@@ -352,18 +354,30 @@ UpfU_LoadAndParseConfig(const char *path) {
     return rc == 0 ? 0 : -1;
 }
 
+int UpfU_GetMac(uint16_t port, struct rte_ether_addr *address) {
+    const struct rte_memzone *mz = rte_memzone_lookup(MZ_PORT_INFO);
+    if (mz && mz->len >= sizeof(struct port_info)) {
+        const struct port_info *manager_ports = mz->addr;
+        if (port < RTE_MAX_ETHPORTS && manager_ports->init[port]) {
+            *address = manager_ports->mac[port];
+            return 0;
+        }
+    }
+    return -1;
+}
+
 void
 init_l2_addrs(void) {
     int ret;
 
-    ret = rte_eth_macaddr_get(g_n3_port, &g_cn_ue_eth);
+    ret = UpfU_GetMac(g_n3_port, &g_cn_ue_eth);
     if (ret < 0) {
         rte_exit(EXIT_FAILURE,
                  "Cannot get MAC address: err=%d, port=%" PRIu16 "\n",
                  ret, g_n3_port);
     }
 
-    ret = rte_eth_macaddr_get(g_n6_port, &g_cn_dn_eth);
+    ret = UpfU_GetMac(g_n6_port, &g_cn_dn_eth);
     if (ret < 0) {
         rte_exit(EXIT_FAILURE,
                  "Cannot get MAC address: err=%d, port=%" PRIu16 "\n",
