@@ -106,9 +106,14 @@ static int start_worker(void) {
 
 /* Called at admission only. An in-progress worker absorbs concurrent requests;
  * at the configured limit, use the least queued ready worker. */
-static int select_worker(void) {
+static int select_worker(const struct Pending *p) {
     if (!control_ready) return control_error ? control_error : -EAGAIN;
     if (!UpfWorkerNfTryLock()) return -EAGAIN;
+    struct {
+        uint16_t slot, instance;
+        unsigned count, capacity;
+    } samples[UPF_MAX_WORKERS];
+    unsigned sample_count = 0;
     int best = -1;
     unsigned length = UINT32_MAX;
     for (uint16_t i = 0; i < Self()->scaling.slot_count; i++) {
@@ -117,14 +122,42 @@ static int select_worker(void) {
         struct onvm_nf *nf = &nfs[r->instance_id];
         if (!onvm_nf_is_valid(nf) || nf->service_id != Self()->scaling.slots[i].service_id || !nf->rx_q) continue;
         unsigned count = rte_ring_count(nf->rx_q);
+        samples[sample_count].slot = i;
+        samples[sample_count].instance = r->instance_id;
+        samples[sample_count].count = count;
+        samples[sample_count++].capacity = rte_ring_get_capacity(nf->rx_q);
         if (count < length) { best = i; length = count; }
     }
     UpfWorkerNfUnlock();
-    if (best >= 0 && length < Self()->scaling.rx_queue_threshold) return best;
-    if (starting >= 0) return starting;
-    int slot = start_worker();
-    if (slot >= 0 || slot == -EAGAIN) return slot;
-    return best >= 0 ? best : slot;
+    int selected, spawn_error = 0;
+    const char *reason;
+    if (best >= 0 && length < Self()->scaling.rx_queue_threshold) {
+        selected = best;
+        reason = "below_threshold";
+    } else if (starting >= 0) {
+        selected = starting;
+        reason = "wait_starting";
+    } else {
+        int slot = start_worker();
+        if (slot == -EAGAIN) return slot; /* Retry without logging lock contention. */
+        selected = slot >= 0 ? slot : (best >= 0 ? best : slot);
+        spawn_error = slot < 0 ? slot : 0;
+        reason = slot >= 0 ? (best >= 0 ? "spawn_threshold" : "spawn_no_ready") :
+            (slot == -ENOSPC ? "worker_limit" : "spawn_failed");
+    }
+    /* Log the values used above, never reread rings or hold the NF lifecycle
+     * lock during logging. */
+    for (unsigned i = 0; i < sample_count; i++) {
+        uint16_t slot = samples[i].slot;
+        UTLT_Info("Admission queue: xid=%u xact=%u slot=%u instance=%u service=%u rx=%u capacity=%u threshold=%u",
+                  p->transaction_id, p->xact_index, slot, samples[i].instance,
+                  Self()->scaling.slots[slot].service_id, samples[i].count,
+                  samples[i].capacity, Self()->scaling.rx_queue_threshold);
+    }
+    UTLT_Info("Admission decision: xid=%u xact=%u ready=%u best_slot=%d min_rx=%u selected_slot=%d reason=%s spawn_error=%d",
+              p->transaction_id, p->xact_index, sample_count, best, best >= 0 ? length : 0,
+              selected, reason, spawn_error);
+    return selected;
 }
 
 static void reap_workers(void) {
@@ -258,7 +291,7 @@ static void advance_request(struct Pending *p) {
     int32_t result;
     switch (p->stage) {
     case WAIT_SLOT: {
-        if (p->slot < 0) p->slot = select_worker();
+        if (p->slot < 0) p->slot = select_worker(p);
         if (p->slot == -EAGAIN) return;
         if (p->slot < 0) { reject(p, PFCP_CAUSE_NO_RESOURCES_AVAILABLE); return; }
         if (g_upf_workers->runtime[p->slot].state != UPF_WORKER_READY) return;
@@ -304,7 +337,8 @@ static void advance_request(struct Pending *p) {
         }
         x->applicationPending = 0;
         if (x->timerHolding) TimerStart(x->timerHolding);
-        UTLT_Info("Admitted SEID=%lu slot=%d TEID=%u", p->session->upfSeid, p->slot, p->session->teid);
+        UTLT_Info("Admitted SEID=%lu slot=%d TEID=%u xid=%u xact=%u", p->session->upfSeid,
+                  p->slot, p->session->teid, p->transaction_id, p->xact_index);
         release_request(p);
         break;
     }
@@ -364,7 +398,7 @@ int UpfScalingEnqueue(Bufblk *message, PfcpXact *xact) {
             .xact_index = xact->index, .transaction_id = xact->transactionId,
             .slot = -1, .deadline = after_ms(Self()->scaling.startup_timeout_ms + 60000)};
         xact->applicationPending = 1;
-        p->slot = select_worker();
+        p->slot = select_worker(p);
         return 0;
     }
     return -ENOSPC;

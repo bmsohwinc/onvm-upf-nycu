@@ -120,7 +120,8 @@ check_all_ports_link_status(uint8_t port_num, uint32_t port_mask);
 static const struct rte_eth_conf port_conf = {
     .rxmode = {
             .mq_mode = RTE_ETH_MQ_RX_RSS,
-            .mtu = RTE_ETHER_MAX_LEN,
+            /* MTU excludes the Ethernet header and FCS; the PMD adds them. */
+            .mtu = RTE_ETHER_MTU,
             .offloads = RTE_ETH_RX_OFFLOAD_CHECKSUM,
         },
     .rx_adv_conf = {

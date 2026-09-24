@@ -11,7 +11,8 @@ scale-down. The target is Intel X520/82599 and a Linux DN running iperf.
 2. Acknowledged manager polling/dispatch updates: committed in `06baf8b`.
 3. UPF-C admission/spawning and classifier reader registration: implemented.
 4. Manager PF filters and deferred PFCP completion: implemented.
-5. Linux build and end-to-end verification on the testbed: remaining.
+5. Testbed verification: Linux build, UE sessions, ping and single-worker TCP
+   iperf confirmed by the user; load-triggered scale-out/performance remain.
 
 Phases 3–4 were implemented together. No tests were added for these phases,
 as requested.
@@ -64,16 +65,11 @@ are not subsequently resampled for an already selected session.
    filter tables to be empty. Do not install the guide's static N3/N6 filters.
    The manager checks `ixgbe`, VF-to-port PCI identity, ntuple mode and capacity;
    it never creates VFs, enables ntuple or resets devices at runtime.
-4. On the gNB, preconfigure each pool N3 IP's neighbor entry to its N3 VF MAC,
-   using the guide's variables and actual interface, for example:
-
-   ```sh
-   sudo ip neigh replace "$N3_IP1" lladdr "$N3_MAC1" nud permanent dev "$RAN_LINK"
-   sudo ip neigh replace "$N3_IP2" lladdr "$N3_MAC2" nud permanent dev "$RAN_LINK"
-   ```
-
-   These entries retain the existing N3 setup. N6 uses the shared PF gateway
-   below; its destination-IP filters select the worker VF.
+4. N3 neighbors can be learned through ARP when VF RX and UPF-U's ARP handling
+   work; permanent gNB neighbor entries are not required. Apply VF VLAN/trust
+   settings before starting manager, and use VF MTU 1500 with standard-MTU PFs.
+   A permanent neighbor can isolate ARP faults during diagnosis, but does not
+   establish that dynamic resolution works. N6 uses the shared PF gateway below.
 5. Assign an N6 IP to the CN's kernel-owned N6 PF, distinct from the worker
    IPs, and install one route for the UE subnet on DN. For the example addresses:
 
@@ -90,8 +86,8 @@ are not subsequently resampled for an already selected session.
    DN resolves the PF IP through ARP. Return frames use the PF destination MAC
    and the UE destination IP; the NIC's per-UE rule selects the N6 VF before
    delivery to the manager. This PF-MAC/IP-filter path was verified in the
-   user's earlier pkt-gen/VF experiment on the same machine and NIC; full UPF
-   traffic remains to be verified. DN needs no per-worker routes or neighbors.
+   user's earlier pkt-gen/VF experiment and subsequent UE-to-DN ping/iperf
+   on the same machine and NIC. DN needs no per-worker routes or neighbors.
    Remove any old per-UE `/32` routes (including helper routes tagged with
    protocol 242), since they override the subnet route. The manager does not
    connect to DN, install routes, or validate this manual route.
@@ -185,5 +181,9 @@ Phases 1–2 had local mock-based checks recorded in the change history. For
 phases 3–4 no tests were added or run; their local compiler checks covered the
 configuration parser and registry. The manual-DN-routing change has shared-header
 and YAML syntax checks plus diff whitespace review, with no tests added.
-A full Linux/DPDK build and end-to-end UPF traffic still require the testbed;
-Meson and the Linux/DPDK build dependencies are unavailable locally.
+The user confirmed the Linux build, PFCP establishment, UE-to-DN ping and TCP
+iperf on the testbed after the FTUP and VF MTU corrections. These confirm the
+single-worker path, not multi-worker scale-out or a throughput gain. Follow the
+[manual scaling experiments](scaling-experiments.md) for the remaining checks.
+Meson and the Linux/DPDK build dependencies are unavailable locally; the new
+admission logging still requires a remote build and verification.

@@ -248,8 +248,8 @@ Status UpfN4BuildAssociationSetupResponse(Bufblk **bufBlkPtr, uint8_t type) {
     response->recoveryTimeStamp.value = &Self()->recoveryTime;
     response->recoveryTimeStamp.len = 4;
 
-    /* Worker mode allocates N3 F-TEIDs; legacy mode keeps SMF allocation. */
-    if (Self()->workerCount) {
+    /* Static and dynamic worker modes allocate N3 F-TEIDs. */
+    if (Self()->workerCount || Self()->scaling.slot_count) {
         response->uPFunctionFeatures.presence = 1;
         response->uPFunctionFeatures.value = upFunctionFeature;
         response->uPFunctionFeatures.len = sizeof(upFunctionFeature);

@@ -18,6 +18,42 @@ current RX-ring occupancy, assigns multiple sessions per worker with distinct
 TEIDs, and waits for classifier, polling and NIC acknowledgments before
 completing PFCP establishment. The static packet path below remains available.
 
+## Admission queue diagnostics
+
+- Log each ready worker's sampled RX count, actual ring capacity and threshold
+  for admission, followed by the selected slot and decision reason. Reuse the
+  policy's reads and log outside the shared NF lock; no periodic control sampler
+  or placement-policy change is introduced.
+- Include PFCP transaction/index in decision and successful-admission logs so
+  the queue values can be linked to the assigned session. See the
+  [manual scaling experiments](../scaling-experiments.md) for telemetry, UDP
+  offered-load steps, bottleneck diagnosis and fixed-worker comparisons.
+- No tests were added or run. Diff whitespace review passed; the logging change
+  still requires a Linux build and testbed verification.
+
+## Manager VF MTU correction
+
+- Set the default ethdev MTU to `RTE_ETHER_MTU` (1500), not
+  `RTE_ETHER_MAX_LEN` (1518, including Ethernet header and FCS). The ixgbe VF
+  PMD adds frame overhead to the configured MTU; the old value requested an
+  oversized frame limit with a standard-MTU PF, which can disable VF RX on
+  82599. DPDK 24.11 logs a failed frame-limit request but can still report
+  the VF as started.
+- Rebuild manager and restart manager and all NFs after clearing old owned
+  NIC filters. Verify telemetry reports VF MTU 1500 and retry ARP reception.
+  Remote telemetry exposed this mismatch; the user subsequently confirmed
+  working UE-to-DN ping and TCP iperf on the testbed. Multi-worker scale-out
+  and its performance remain to be verified. The jumbo-frame option is unchanged.
+
+## Dynamic-mode FTUP advertisement
+
+- Advertise the UP Function Features FTUP bit when `scaling.worker_slots` is
+  configured, as well as for the static worker list. Dynamic mode leaves the
+  static `workerCount` at zero; checking only that field suppressed FTUP and
+  made SMF send an explicit F-TEID that dynamic admission rejected with cause 71.
+- Rebuild UPF-C and establish a fresh SMF association so SMF learns FTUP and
+  requests CH=1 IPv4 allocation. No SMF or YAML change is needed for this fix.
+
 ## Manual DN routing
 
 - Remove manager SSH/helper execution, remote route acknowledgments and the
