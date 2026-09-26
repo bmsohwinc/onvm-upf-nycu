@@ -144,8 +144,8 @@ static Status PublishWorkerSlots(void) {
     const struct port_info *manager_ports = port_mz->addr;
     const struct core_status *manager_cores = core_mz->addr;
     const uint16_t *service_counts = service_mz->addr;
-    UTLT_Assert(config->rx_queue_threshold < NF_QUEUE_RINGSIZE && config->rx_queue_threshold < NUM_MBUFS,
-                return STATUS_ERROR, "RX queue threshold must be below ring size and dataplane mbuf count");
+    UTLT_Assert(config->rx_queue_threshold < NF_RX_QUEUE_RINGSIZE - 1 && config->rx_queue_threshold < NUM_MBUFS,
+                return STATUS_ERROR, "RX queue threshold must be below usable RX capacity and dataplane mbuf count");
     for (uint16_t i = 0; i < config->slot_count; i++) {
         const UpfWorkerSlotConfig *slot = &config->slots[i];
         UTLT_Assert(slot->service_id < MAX_SERVICES && slot->service_id < g_upf_workers->service_limit &&

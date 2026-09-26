@@ -523,7 +523,7 @@ onvm_nf_init_rings(struct onvm_nf *nf) {
         tq_name = get_tx_queue_name(instance_id);
         msg_q_name = get_msg_queue_name(instance_id);
 
-        nf->rx_q = rte_ring_create(rq_name, ringsize, socket_id, RING_F_SC_DEQ); /* multi prod, single cons */
+        nf->rx_q = rte_ring_create(rq_name, NF_RX_QUEUE_RINGSIZE, socket_id, RING_F_SC_DEQ); /* multi prod, single cons */
         if (nf->rx_q == NULL)
                 rte_exit(EXIT_FAILURE, "Cannot create rx ring queue for NF %u\n", instance_id);
 

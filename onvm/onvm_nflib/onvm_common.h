@@ -72,7 +72,8 @@
 #define MAX_NFS_PER_SERVICE 32   // max number of NFs per service.
 
 #define NUM_MBUFS 32767          // total number of mbufs (2^15 - 1)
-#define NF_QUEUE_RINGSIZE 65536  // size of queue for NFs
+#define NF_QUEUE_RINGSIZE 65536  // TX ring size; also used by example-local queues
+#define NF_RX_QUEUE_RINGSIZE 4096 // NF RX ring size (4095 usable, no RING_F_EXACT_SZ)
 
 #define PACKET_READ_SIZE ((uint16_t)32)
 

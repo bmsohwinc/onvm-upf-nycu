@@ -43,9 +43,11 @@ Remove `dn_route_helper`, `dn_host` and `dn_interface` from older configurations
 these keys are no longer accepted. DN routing is configured manually, once per
 UE subnet, and is not part of the worker configuration or admission ACKs.
 
-The NF RX ring is sized at **65536 entries (65535 usable)**; 32 is the packet
-burst size. The shared dataplane pool also limits occupancy (`NUM_MBUFS=32767`).
-The configured threshold must be below both limits. Admission picks the least
+The NF RX ring is sized at **4096 entries (4095 usable)**; TX rings remain at
+65536 entries (65535 usable), and 32 is the packet burst size. The shared
+dataplane pool also limits occupancy (`NUM_MBUFS=32767`). The configured
+threshold must be below usable RX capacity and the mbuf count. Admission picks
+the least
 queued ready worker below threshold; otherwise it starts one unused slot or
 waits for the worker already starting. At `max_workers`, it uses the least
 queued ready worker. A brief lock conflict defers the admission read; queues

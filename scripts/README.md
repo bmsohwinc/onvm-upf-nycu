@@ -3,6 +3,24 @@
 This directory contains various scripts to run and configure different
 portions of openNetVM
 
+## Queue capture for dynamic scaling
+
+Follow the current UPF-C INFO log to collect four stable slot columns while
+workers start gradually (instance IDs are learned from READY events):
+
+```sh
+sudo python3 scripts/qcheck.py --upfc-log run-A/upfc.log --slots 4 \
+    --interval 0.1 > run-A/queues.csv
+```
+
+Start manager first; use a fresh log/capture for each deployment run. Queue
+cells stay blank until a worker is READY. Fixed instance IDs still work:
+`sudo python3 scripts/qcheck.py 2 9 --ports 0 1 2 3`. The script also captures
+shared mbuf availability, port packet/byte/error counters and their deltas.
+See the [two-experiment test plan](../docs/sriov-upf/scaling-experiments.md)
+for queue interpretation, startup/load sequencing, plotting and the four-session
+lossless UDP comparison.
+
 ## Manager VF I/O and UPF-U rings
 
 The manager polls all enabled ports and transmits packets returned through NF
