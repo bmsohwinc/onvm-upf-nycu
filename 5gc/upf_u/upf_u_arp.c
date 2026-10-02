@@ -412,6 +412,12 @@ attach_l2_or_arp(struct rte_mbuf *pkt,
     struct rte_ether_addr local_mac;
 
     ne = neigh_lookup(out_port, next_hop_ip_be);
+    /* Static UL N6 peer VF MAC; comment out this block to restore ARP. */
+    static struct neigh_entry n6_vf = {
+        .mac = {.addr_bytes = {0x90, 0xe2, 0xba, 0xb3, 0xba, 0x99}}, .state = NEIGH_REACHABLE
+    };
+    if (out_port == g_n6_port && local_ip_be == g_n6_ip_be)
+        ne = &n6_vf;
     if (ne == NULL || ne->state != NEIGH_REACHABLE) {
         (void)send_arp_request(out_port, local_ip_be, next_hop_ip_be, nf);
         return -1;
@@ -422,6 +428,12 @@ attach_l2_or_arp(struct rte_mbuf *pkt,
     if (eth_hdr == NULL)
         return -1;
 
+    /* Port MACs are cached at startup; avoid a shared memzone lookup per packet. */
+    // if (out_port == g_n6_port)
+    //     local_mac = g_cn_dn_eth;
+    // else if (out_port == g_n3_port)
+    //     local_mac = g_cn_ue_eth;
+    // else 
     if (UpfU_GetMac(out_port, &local_mac) < 0)
         return -1;
 

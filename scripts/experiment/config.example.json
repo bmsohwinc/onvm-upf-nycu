@@ -1,0 +1,44 @@
+{
+  "core_repo": "${LAB_HOME}/L25GC-plus",
+  "upf_repo": "${LAB_HOME}/onvm-upf-scaling",
+  "smf_repo": "${LAB_HOME}/smf-sriov",
+  "xio_repo": "${LAB_HOME}/xio-scaling",
+  "ueransim_repo": "${LAB_HOME}/L25GC-plus/UERANSIM",
+  "dpdk_repo": "${LAB_HOME}/dpdk",
+  "results_root": "/dev/shm/upf-experiments",
+  "cn": {
+    "manager_allow": ["0000:06:10.0", "0000:06:00.1"],
+    "manager_portmask": "3",
+    "manager_nf_coremask": "0xFFF8",
+    "upfc_config": "${LAB_HOME}/onvm-upf-scaling/5gc/upf_c/config/upfcfg.scaling.yaml",
+    "upfc_eal": ["-l", "4", "-n", "3", "--proc-type=secondary", "--file-prefix=rte", "--no-pci"],
+    "nf_config_dir": "${LAB_HOME}/L25GC-plus/onvm_nf_configs/scaling",
+    "control_nfs": ["nrf", "udr", "udm", "ausf", "nssf", "pcf", "chf", "amf", "smf"],
+    "control_start_gap_s": 2,
+    "monitor_core": "19",
+    "slots": 2,
+    "queue_interval_s": 0.2,
+    "queue_threshold": 1024,
+    "timing": true
+  },
+  "ue": {
+    "gnb_config": "config/free5gc-gnb.yaml",
+    "gnb_ready": "NG Setup procedure is successful",
+    "ue_ready": "PDU Session establishment is successful",
+    "n3_src_ip": "10.10.2.1",
+    "dn_ip": "10.10.3.2",
+    "qfi": 1,
+    "inner_size": 64,
+    "setup_duration_s": 120,
+    "phase_s": 30,
+    "settle_s": 3,
+    "streams": [
+      {"config": "config/free5gc-ue.yaml", "core": "2", "pci": "0000:06:10.0", "src_mac": "02:00:00:04:00:01", "dst_mac": "02:00:00:03:00:01", "n3_dst_ip": "10.10.2.11", "teid": "0x1001", "ue_ip": "10.60.0.1", "rate": 1000000},
+      {"config": "config/free5gc-ue-2.yaml", "core": "3", "pci": "0000:06:10.2", "src_mac": "02:00:00:04:00:02", "dst_mac": "02:00:00:03:00:02", "n3_dst_ip": "10.10.2.12", "teid": "0x1002", "ue_ip": "10.60.0.2", "rate": 985000}
+    ]
+  },
+  "dn": {
+    "eal": ["-l", "2-3", "-a", "0000:06:10.1", "--file-prefix=dn-sink"],
+    "args": ["-i", "--nb-cores=1", "--rxq=1", "--txq=1", "--rxd=1024", "--forward-mode=rxonly"]
+  }
+}

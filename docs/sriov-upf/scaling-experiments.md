@@ -82,8 +82,30 @@ controlled one/four-worker comparisons and record the vanilla baseline's sizes.
 ```sh
 mkdir -p run-A
 sudo python3 scripts/qcheck.py --upfc-log run-A/upfc.log --slots 4 \
-    --interval 0.1 > run-A/queues.csv 2> run-A/qcheck.log
+    --interval 0.1 --watch --threshold 1024 > run-A/queues.csv 2> run-A/qcheck.log
+# Another terminal:
+tail -f run-A/qcheck.log
 ```
+
+Watch output reports `RX_HIGH` on the first observed RX ≥ threshold or a
+transition from below; `RX_LOW` reports a return below. Summaries show RX/TX
+and peak sampled RX since the previous summary. `ALL_SAMPLED_HIGH` requires
+valid at/above-threshold samples from every monitored ready worker; it does
+not initiate or prove scaling. Match `--threshold` to UPF-C YAML. CSV also
+contains `rx_threshold`, per-worker `*_rx_ge_threshold`, and
+`all_rx_ge_threshold` (1/0, blank for unavailable data). Record the iperf
+start/change timestamp and per-UE `-b` value alongside each trial: the monitor
+does not know iperf's requested rate. Align UTC event timestamps to those
+load changes. A lack of sampled HIGH events cannot rule out shorter spikes.
+
+To pin capture on Linux, insert `taskset -c <SPARE_CPU>` between `sudo` and
+`python3`. Startup prints its PID and allowed CPU list. Verify using
+`taskset -pc <PID>` and compare with NF thread affinity using
+`taskset -apc <NF_PID>`. Choose a core outside all configured worker slots,
+manager, UPF-C and other busy NFs; also exclude their SMT siblings shown by
+`lscpu -e=CPU,CORE,SOCKET,ONLINE`. Reserve the monitor's physical core for the
+whole experiment, including workers that have not started yet. Affinity alone
+does not make that core exclusive ([taskset](https://man7.org/linux/man-pages/man1/taskset.1.html)).
 
 Run capture in its own terminal, preferably on a spare core. It discovers
 slot-to-instance mappings from existing Spawned/READY/exit logs. Columns
@@ -171,6 +193,68 @@ congestion cannot validate this scaling trigger. A lower threshold belongs in
 a separately labeled sensitivity run. Threshold stress may lose packets;
 this experiment tests queue/placement behavior, not lossless transition.
 An overloaded old worker can stay backlogged after another worker starts.
+
+### If UERANSIM loses the radio link before UPF queues build
+
+Treat that trial as invalid for lossless capacity. An empty sampled UPF queue
+does not prove zero load or locate the bottleneck. Compare actual N3 RX pps
+and drops **before** the disconnection, as well as receiver goodput.
+
+In upstream UERANSIM, the UE and gNB RLS UDP tasks check heartbeats against a
+2000-ms threshold. Heartbeats and user PDUs share the RLS UDP path; overloaded
+processing or socket loss can prevent timely heartbeat delivery. This is a
+candidate explanation, not a diagnosis from the NAS error alone. Confirm the
+deployed revision and the preceding UE/gNB RLS logs against the
+[UE source](https://github.com/aligungr/UERANSIM/blob/master/src/ue/rls/udp_task.cpp)
+and [gNB source](https://github.com/aligungr/UERANSIM/blob/master/src/gnb/rls/udp_task.cpp).
+
+Run these diagnostics on the **UE/gNB host**, whose CPU allocation is separate
+from CN. Capture counters before/after and socket state during a 700/800-Mbit/s
+comparison (commands need sysstat/iproute2):
+
+```sh
+lscpu -e=CPU,CORE,SOCKET,ONLINE
+pgrep -af 'nr-ue|nr-gnb|iperf3'
+pidstat -t -u -C 'nr-ue|nr-gnb|iperf3' 1 15
+nstat -az UdpInErrors UdpRcvbufErrors UdpSndbufErrors
+sudo ss -uanmp
+```
+
+Look for a saturated individual task, growing UDP receive-buffer errors, and
+per-socket drops on nr-gnb/nr-ue. `ss -m` reports socket memory and `d` drop
+counts ([ss manual](https://man7.org/linux/man-pages/man8/ss.8.html)); host UDP
+counters alone cannot attribute drops to one process. A nonempty internal
+UERANSIM task queue may also cause delay without kernel socket drops.
+
+Change one factor at a time:
+
+1. If processes compete for CPU, assign gNB and UE disjoint sets of physical
+   cores and iperf another core. UERANSIM is multithreaded: avoid squeezing all
+   its tasks onto one core. Existing processes can be moved with
+   `sudo taskset -acp <CPU_SET> <PID>`; `-a` applies to every thread. Verify
+   `taskset -apc <PID>`. Exclude SMT siblings across sets and other busy work.
+   Affinity does not parallelize a saturated single RLS task.
+2. Retest 800M/512B with `--pacing-timer 100` added to the iperf command.
+   iperf's default is 1000 microseconds; 100 requests smoother emission at
+   additional timer/CPU cost. Verify the actual sender rate is maintained
+   ([iperf manual](https://software.es.net/iperf/invoking.html)).
+3. Separately try 800M/1200B. Requested rate falls from about 195313 to 83333
+   pps at the same payload bitrate. Stability only with larger packets supports
+   a packet-rate limitation; it does not demonstrate 512-byte capacity.
+4. If a single UE process is limiting, test two independent UE processes at
+   moderate rates, both placed on the original worker, and check aggregate
+   N3 pps. This may bypass a per-UE limit but not a shared gNB bottleneck.
+   It also consumes sessions: retain this as a diagnostic, then restart for
+   the four-session/four-worker placement experiment.
+
+Raising the RLS timeout can mask disconnections without adding processing
+capacity; keep it out of the primary comparison. Likewise, reducing the UPF
+threshold cannot trigger scale-out if admission samples remain zero. If the
+generator cannot saturate UPF processing, use a faster GTP-U source with real
+admitted session endpoints/TEIDs for a separate UPF dataplane test. Keep
+UERANSIM for session establishment; preserve sessions while injecting traffic,
+and measure sequence-aware loss at DN. Label this separately from UE-to-DN
+iperf: the generator bypasses UERANSIM's user-plane path and its bottleneck.
 
 Plot four RX traces against `elapsed_s`, a horizontal 1024 threshold and a
 4095 capacity line. Leave missing cells as gaps, never replace them with zero.

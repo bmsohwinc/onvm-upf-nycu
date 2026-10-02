@@ -3,6 +3,21 @@
 This directory contains various scripts to run and configure different
 portions of openNetVM
 
+## Three-node tmux experiment
+
+[`experiment/README.md`](experiment/README.md) provides CN, UE and DN launchers
+for the existing commands, separate process logs, automatic three-phase traffic,
+testpmd counter control and timing reports. Edit the example configuration for
+the actual testbed before starting a run.
+
+## UPF-U timing capture
+
+For the fixed-session UE1-only / both-UEs / UE1-only experiment, see
+[NF timing instructions](../docs/sriov-upf/nf-timing.md). Opt-in NFLIB diagnostics
+write one CSV per worker. Alongside `qcheck.py`, use `nf_timing.py mark` to label
+phases and `nf_timing.py report` to produce interval and phase summaries. Neither
+command controls traffic or changes worker placement.
+
 ## Queue capture for dynamic scaling
 
 Follow the current UPF-C INFO log to collect four stable slot columns while
@@ -10,13 +25,31 @@ workers start gradually (instance IDs are learned from READY events):
 
 ```sh
 sudo python3 scripts/qcheck.py --upfc-log run-A/upfc.log --slots 4 \
-    --interval 0.1 > run-A/queues.csv
+    --interval 0.1 --watch --threshold 1024 > run-A/queues.csv
 ```
 
 Start manager first; use a fresh log/capture for each deployment run. Queue
 cells stay blank until a worker is READY. Fixed instance IDs still work:
 `sudo python3 scripts/qcheck.py 2 9 --ports 0 1 2 3`. The script also captures
 shared mbuf availability, port packet/byte/error counters and their deltas.
+`--watch` sends readable worker changes, `RX_HIGH`/`RX_LOW` events and a
+one-second `STATUS` line to stderr, keeping CSV on stdout. `peak` is the maximum
+sampled RX since the previous STATUS. `ALL_SAMPLED_HIGH` means every monitored
+ready worker was at/above the threshold in this sequential sample; it is not
+a scaling decision. Unknown queue values never become a below-threshold zero.
+`--threshold` defaults to 1024 and must match UPF-C's configuration; it changes
+only monitoring. `--status-interval 2` reduces summary frequency independently
+of sampling. Add `2> run-A/qcheck.events.log` and use `tail -f` in another
+terminal to retain/read the events. Each event includes UTC and elapsed time.
+
+Pin capture on Linux with `sudo taskset -c <SPARE_CPU> python3 scripts/qcheck.py ...`.
+Watch startup prints `pid` and `allowed_cpus`; verify with `taskset -pc <PID>`.
+Choose a core outside manager, all configured future worker slots, UPF-C and
+other busy NFs, including their SMT siblings (`lscpu -e=CPU,CORE,SOCKET,ONLINE`).
+Reserve it from future NF allocations; affinity confines the monitor but does
+not prevent other processes from sharing that CPU. See the
+[taskset manual](https://man7.org/linux/man-pages/man1/taskset.1.html).
+
 See the [two-experiment test plan](../docs/sriov-upf/scaling-experiments.md)
 for queue interpretation, startup/load sequencing, plotting and the four-session
 lossless UDP comparison.

@@ -61,6 +61,7 @@
 #include "onvm_includes.h"
 #include "onvm_nflib.h"
 #include "onvm_sc_common.h"
+#include "onvm_nflib_timing.h"
 
 /**********************************Macros*************************************/
 
@@ -163,7 +164,8 @@ onvm_nflib_parse_args(int argc, char *argv[], struct onvm_nf_init_cfg *nf_init_c
  */
 static inline uint16_t
 onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx,
-                           nf_pkt_handler_fn handler, int pkt_meta_offset) __attribute__((always_inline));
+                           nf_pkt_handler_fn handler, int pkt_meta_offset,
+                           struct nf_timing *timing) __attribute__((always_inline));
 
 /*
  * Check if there is a message available for this NF and process it
@@ -618,6 +620,8 @@ onvm_nflib_thread_main_loop(void *arg) {
         if (nf->function_table->setup != NULL)
                 nf->function_table->setup(nf_local_ctx);
 
+        struct nf_timing timing = {0};
+        nf_timing_init(&timing, nf);
         start_time = rte_get_tsc_cycles();
         uint64_t last_time_get_pkt = rte_get_tsc_cycles();
         int init_timeout = 0;
@@ -630,8 +634,14 @@ onvm_nflib_thread_main_loop(void *arg) {
                         }
                 }
 
+                if (unlikely(timing.file != NULL)) {
+                        timing.window.polls++;
+                        timing.sample = !(timing.sequence++ & NF_TIMING_SAMPLE_MASK);
+                        if (timing.sample) nf_timing_begin(&timing, nf);
+                }
                 nb_pkts_added =
-                        onvm_nflib_dequeue_packets((void **)pkts, nf_local_ctx, nf->function_table->pkt_handler, onvm_config->dynfield_offset);
+                        onvm_nflib_dequeue_packets((void **)pkts, nf_local_ctx, nf->function_table->pkt_handler,
+                                                  onvm_config->dynfield_offset, timing.file ? &timing : NULL);
 
                 /* TODO: Fix up the segment fault caused by timeout trigger */
                 if (likely(nb_pkts_added > 0)) {
@@ -649,6 +659,11 @@ onvm_nflib_thread_main_loop(void *arg) {
                 onvm_pkt_enqueue_tx_thread(nf->nf_tx_mgr->to_tx_buf, nf);
                 onvm_pkt_flush_all_nfs(nf->nf_tx_mgr, nf);
 
+                uint64_t timing_tx_end = 0;
+                if (unlikely(timing.file && timing.sample && timing.last_dequeued)) {
+                        timing_tx_end = rte_get_tsc_cycles();
+                        timing.window.tx_ticks += timing_tx_end - timing.handled;
+                }
                 onvm_nflib_dequeue_messages(nf_local_ctx);
                 if (nf->function_table->user_actions != ONVM_NO_CALLBACK) {
                         rte_atomic16_set(&nf_local_ctx->keep_running,
@@ -656,6 +671,12 @@ onvm_nflib_thread_main_loop(void *arg) {
                                          rte_atomic16_read(&nf_local_ctx->keep_running));
                 }
 
+                if (unlikely(timing.file && timing.sample)) {
+                        uint64_t timing_end = rte_get_tsc_cycles();
+                        if (timing.last_dequeued)
+                                timing.window.callback_ticks += timing_end - timing_tx_end;
+                        if (timing_end >= timing.next_report) nf_timing_report(&timing, nf, timing_end);
+                }
                 if (nf->flags.time_to_live && unlikely((rte_get_tsc_cycles() - start_time) *
                                           TIME_TTL_MULTIPLIER / rte_get_timer_hz() >= nf->flags.time_to_live)) {
                         printf("Time to live exceeded, shutting down\n");
@@ -666,6 +687,10 @@ onvm_nflib_thread_main_loop(void *arg) {
                         printf("Packet limit exceeded, shutting down\n");
                         rte_atomic16_set(&nf_local_ctx->keep_running, 0);
                 }
+        }
+        if (timing.file) {
+                nf_timing_report(&timing, nf, rte_get_tsc_cycles());
+                if (timing.file) fclose(timing.file);
         }
         return NULL;
 }
@@ -1003,7 +1028,8 @@ onvm_nflib_parse_config(struct onvm_configuration *config) {
 }
 
 static inline uint16_t
-onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx, nf_pkt_handler_fn handler, int pkt_meta_offset) {
+onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx, nf_pkt_handler_fn handler,
+                          int pkt_meta_offset, struct nf_timing *timing) {
         struct onvm_nf *nf;
         struct onvm_pkt_meta *meta;
         uint16_t i, nb_pkts;
@@ -1015,6 +1041,13 @@ onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx, 
         /* Dequeue all packets in ring up to max possible. */
         nb_pkts = rte_ring_dequeue_burst(nf->rx_q, pkts, PACKET_READ_SIZE, NULL);
 
+        if (unlikely(timing != NULL)) {
+                if (timing->sample) timing->dequeued = rte_get_tsc_cycles();
+                timing->last_dequeued = nb_pkts;
+                timing->window.packets += nb_pkts;
+                timing->window.bursts += nb_pkts != 0;
+                timing->window.full_bursts += nb_pkts == PACKET_READ_SIZE;
+        }
         if (unlikely(nb_pkts == 0)) {
                 return 0;
         }
@@ -1031,6 +1064,15 @@ onvm_nflib_dequeue_packets(void **pkts, struct onvm_nf_local_ctx *nf_local_ctx, 
                 } else {
                         nf->stats.tx_buffer++;
                 }
+        }
+        if (unlikely(timing && timing->sample)) {
+                timing->handled = rte_get_tsc_cycles();
+                uint64_t ticks = timing->handled - timing->dequeued;
+                timing->window.samples++;
+                timing->window.sampled_packets += nb_pkts;
+                timing->window.dequeue_ticks += timing->dequeued - timing->begin;
+                timing->window.handler_ticks += ticks;
+                if (ticks > timing->window.handler_max_ticks) timing->window.handler_max_ticks = ticks;
         }
         if (ONVM_NF_HANDLE_TX) {
                 /* Only return mbufs released by the handler; retained packets leave later. */
