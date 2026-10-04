@@ -1,5 +1,9 @@
 # Evaluation: queue evolution and lossless uplink UDP capacity
 
+This procedure describes the admission-driven baseline. On the proactive branch,
+use the [updated policy and experiment sequence](../../5gc/upf_c/README.md):
+wait for load-triggered worker readiness before admitting the next UE.
+
 Two separate experiments: (A) admission-driven growth from one to four UPF-Us;
 (B) maximum measured UDP goodput with exactly four sessions, comparing four
 UPF-Us against one UPF-U in L25GC+. These are testbed procedures, not results.

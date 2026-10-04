@@ -1,9 +1,11 @@
 # Dynamic UPF-U scale-out
 
 Scope: new IPv4 sessions, multiple sessions per worker, and one UL TEID per
-session. UPF-C reads current worker RX-ring occupancy at admission. There is no
-periodic queue sampling, cooldown, session-count threshold, migration or
-scale-down. The target is Intel X520/82599 and a Linux DN running iperf.
+session. UPF-C periodically samples worker RX rings to start workers ahead of
+new sessions; admissions select the least-queued READY worker. See the
+[proactive scaling README](../../5gc/upf_c/README.md) for the policy, configuration
+and timing logs. There is no forecasting, migration or scale-down.
+The target is Intel X520/82599 and a Linux DN running iperf.
 
 ## Implementation phases
 
@@ -11,8 +13,9 @@ scale-down. The target is Intel X520/82599 and a Linux DN running iperf.
 2. Acknowledged manager polling/dispatch updates: committed in `06baf8b`.
 3. UPF-C admission/spawning and classifier reader registration: implemented.
 4. Manager PF filters and deferred PFCP completion: implemented.
-5. Testbed verification: Linux build, UE sessions, ping and single-worker TCP
-   iperf confirmed by the user; load-triggered scale-out/performance remain.
+5. Baseline testbed verification: the user reported two workers forwarding
+   1.45 Mpps each without drops after the MAC/logger fixes. The periodic
+   proactive policy still needs testbed verification.
 
 Phases 3–4 were implemented together. No tests were added for these phases,
 as requested.
@@ -33,7 +36,9 @@ exclusive. The static configuration continues to use its original packet path.
 | `n3_ip`, `n6_ip` | Distinct, fixed IPv4 addresses for the slot. All its sessions share these IPs. |
 | `n3_peer_ip`, `n6_peer_ip` | gNB and DN next-hop IPv4 addresses; dynamic workers run without NAT. |
 | `min_workers`, `max_workers` | Initial worker count and process limit; defaults 1 and the slot count. |
-| `rx_queue_threshold` | Packets; default 1024. A new worker is requested when every ready worker is at or above it. |
+| `rx_queue_threshold` | Packets; default 40. All READY queues must be strictly above it for consecutive sample rounds. |
+| `queue_sample_interval_ms` | Sampling interval; default 10 ms. |
+| `queue_consecutive_samples` | Consecutive qualifying rounds before starting one worker; default 3. |
 | `teid_first`, `teid_last` | Global, monotonically allocated per-session UL TEID range; defaults `0x1001` through `0xffffffff`. No reuse on failed attempts. |
 | `worker_binary` | Absolute executable path to `l25gc_upf_u` on the CN. |
 | `file_prefix` | Same EAL namespace as manager and UPF-C; default `rte`. |
@@ -46,16 +51,17 @@ UE subnet, and is not part of the worker configuration or admission ACKs.
 The NF RX ring is sized at **4096 entries (4095 usable)**; TX rings remain at
 65536 entries (65535 usable), and 32 is the packet burst size. The shared
 dataplane pool also limits occupancy (`NUM_MBUFS=32767`). The configured
-threshold must be below usable RX capacity and the mbuf count. Admission picks
-the least
-queued ready worker below threshold; otherwise it starts one unused slot or
-waits for the worker already starting. At `max_workers`, it uses the least
-queued ready worker. A brief lock conflict defers the admission read; queues
-are not subsequently resampled for an already selected session.
+threshold must be below usable RX capacity and the mbuf count. Periodic sampling
+starts one unused slot when all READY workers remain above threshold for the
+configured number of samples. Only one worker starts at a time, up to
+`max_workers`. Admission always selects the least-queued READY worker and never
+spawns. If none is READY, it waits within the request timeout. A brief lock
+conflict defers the admission read; queues are not subsequently resampled for
+an already selected session.
 
 ## Setup
 
-1. Rebuild manager and all NFs together. The registry ABI is now **4**, and the
+1. Rebuild manager and all NFs together. The registry ABI is now **5**, and the
    shared session/PFCP layouts changed. Restart the whole deployment between
    configurations; attaching a replacement UPF-C to a live run is unsupported.
 2. Follow the [PF/VF preparation](README.md) for every configured slot. Create
@@ -156,7 +162,8 @@ No NIC TEID match is needed because each worker has its own N3 destination IP.
 UPF-C owns runtime state/generation/instance fields; each worker owns its
 registration and classifier ACK fields. Reader membership is installed before
 spawn and removed only after confirmed process exit. Inactive slots do not block
-reclamation. The shared NF lock protects ring lifetime during admission reads.
+reclamation. The shared NF lock protects ring lifetime during admission and
+periodic sampling reads.
 
 There is one outstanding steering operation at a time, and its result must be
 consumed before the next submission. Polling ACKs remain separate from NIC
@@ -179,13 +186,9 @@ dynamic-mode deletion requests return a PFCP rejection and retain the session.
 
 ## Validation status
 
-Phases 1–2 had local mock-based checks recorded in the change history. For
-phases 3–4 no tests were added or run; their local compiler checks covered the
-configuration parser and registry. The manual-DN-routing change has shared-header
-and YAML syntax checks plus diff whitespace review, with no tests added.
-The user confirmed the Linux build, PFCP establishment, UE-to-DN ping and TCP
-iperf on the testbed after the FTUP and VF MTU corrections. These confirm the
-single-worker path, not multi-worker scale-out or a throughput gain. Follow the
-[manual scaling experiments](scaling-experiments.md) for the remaining checks.
-Meson and the Linux/DPDK build dependencies are unavailable locally; the new
-admission logging still requires a remote build and verification.
+The proactive sampler/placement and manager-polling mock suites pass locally
+with ASan/UBSan. YAML parser tests require libyaml headers, unavailable locally;
+the full Linux/DPDK build and hardware behavior require CN. Earlier testbed
+results cover the baseline forwarding path, not this periodic policy. Follow
+the [proactive experiment steps](../../5gc/upf_c/README.md#quick-experiment)
+to verify scale-out before session arrival and collect lifecycle timings.

@@ -19,6 +19,10 @@ Edit `lab.json` on each node. `${LAB_HOME}` expands to the invoking user's home
 (from `SUDO_USER`), not root's home. Verify repositories, binary locations and
 the actual **dynamic scaling** UPF-C YAML. The source-tree `upfcfg.yaml` is not
 currently a dynamic worker configuration. Set `max_workers: 2` for this test.
+For the [proactive policy](../../5gc/upf_c/README.md), set the YAML's
+`rx_queue_threshold: 40`, `queue_sample_interval_ms: 10` and
+`queue_consecutive_samples: 3`. Match `cn.queue_threshold` in `lab.json` to 40;
+this JSON field affects qcheck's display only, not scaling decisions.
 
 UPF-C uses ONVM manual core assignment (`-m`) to retain the core selected by
 `cn.upfc_eal` (`-l 7` in the example). Reserve that core for UPF-C: it must be
@@ -134,8 +138,9 @@ sudo -E bash scripts/experiment/ue.sh scripts/experiment/lab.json run01 load1
 
 `start` launches gNB and waits for NG setup. `ue1` waits for successful PDU
 establishment; edit the configurable readiness patterns if your UERANSIM logs
-use different text. `load1` starts the 120-second setup generator. While worker
-1's RX backlog is above threshold in CN's qcheck window:
+use different text. `load1` starts the 120-second setup generator. Keep that
+traffic running. On CN, wait for `Scale-out trigger` and then
+`UPF-U slot=1 ... READY` in `upfc.log` before requesting UE2:
 
 ```sh
 sudo -E bash scripts/experiment/ue.sh scripts/experiment/lab.json run01 ue2
@@ -145,6 +150,8 @@ sudo -E bash scripts/experiment/ue.sh scripts/experiment/lab.json run01 ue2
 entries and both workers READY. UE2 establishment alone does not prove placement
 on worker 2. If placement is wrong, correct setup and use a clean run. If setup
 traffic ends before admission, use a longer `setup_duration_s` on the next run.
+An arrival during startup selects an existing READY worker; it does not wait
+for the new worker. qcheck's slower samples may miss the triggering backlog.
 
 ```sh
 sudo -E bash scripts/experiment/ue.sh scripts/experiment/lab.json run01 stop-traffic

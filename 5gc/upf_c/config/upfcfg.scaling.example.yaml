@@ -15,7 +15,9 @@ configuration:
   scaling:
     min_workers: 1
     max_workers: 2             # Defaults to the number of slots if omitted.
-    rx_queue_threshold: 1024   # Packets; evaluated on new-session arrival.
+    rx_queue_threshold: 40     # Every READY worker must have more than this many packets.
+    queue_sample_interval_ms: 10
+    queue_consecutive_samples: 3
     worker_binary: /absolute/path/to/onvm-upf/build/5gc/l25gc_upf_u
     file_prefix: rte          # Must match manager and UPF-C EAL --file-prefix.
     startup_timeout_ms: 30000 # Registration/classifier startup, not a cooldown.

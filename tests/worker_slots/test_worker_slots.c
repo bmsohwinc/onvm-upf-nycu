@@ -61,6 +61,8 @@ static int Config(yaml_document_t *doc, unsigned count, const char *slot_key, co
     Pair(doc, root, "worker_binary", "/tmp/l25gc_upf_u");
     Pair(doc, root, "n3_pf", "ens1f0");
     Pair(doc, root, "n6_pf", "ens1f1");
+    Pair(doc, root, "n3_peer_ip", "192.168.2.2");
+    Pair(doc, root, "n6_peer_ip", "192.168.3.2");
     int key = Scalar(doc, "worker_slots");
     int seq = yaml_document_add_sequence(doc, NULL, YAML_BLOCK_SEQUENCE_STYLE);
     assert(yaml_document_append_mapping_pair(doc, root, key, seq));
@@ -84,8 +86,13 @@ int main(void) {
     int root = Config(&doc, 2, NULL, NULL);
     UpfScalingConfig config = Parse(&doc, root, 1);
     assert(config.slot_count == 2 && config.min_workers == 1 && config.max_workers == 2);
-    assert(config.rx_queue_threshold == 1024 && config.teid_first == 0x1001 && config.teid_last == UINT32_MAX);
+    assert(config.rx_queue_threshold == 40 && config.teid_first == 0x1001 && config.teid_last == UINT32_MAX);
+    assert(config.queue_sample_interval_ms == 10 && config.queue_consecutive_samples == 3);
     assert(config.slots[0].service_id == 14 && config.slots[1].n6_port == 3);
+    Pair(&doc, root, "queue_sample_interval_ms", "20");
+    Pair(&doc, root, "queue_consecutive_samples", "5");
+    UpfScalingConfig custom = Parse(&doc, root, 1);
+    assert(custom.queue_sample_interval_ms == 20 && custom.queue_consecutive_samples == 5);
     Pair(&doc, root, "teid_first", "0xfffffffe");
     Pair(&doc, root, "teid_last", "4294967295");
     Parse(&doc, root, 1);
@@ -94,8 +101,9 @@ int main(void) {
     yaml_document_delete(&doc);
 
     const char *bad_keys[] = {"min_workers", "max_workers", "max_workers", "rx_queue_threshold",
-                             "rx_queue_threshold", "teid_first", "teid_last", "spawn_cooldown_ms"};
-    const char *bad_values[] = {"0", "0", "3", "0", "-1", "4294967296", "4096", "1000"};
+                             "rx_queue_threshold", "teid_first", "teid_last", "spawn_cooldown_ms",
+                             "queue_sample_interval_ms", "queue_consecutive_samples"};
+    const char *bad_values[] = {"0", "0", "3", "0", "-1", "4294967296", "4096", "1000", "0", "0"};
     for (size_t i = 0; i < sizeof(bad_keys) / sizeof(bad_keys[0]); i++) {
         root = Config(&doc, 2, NULL, NULL);
         Pair(&doc, root, bad_keys[i], bad_values[i]);

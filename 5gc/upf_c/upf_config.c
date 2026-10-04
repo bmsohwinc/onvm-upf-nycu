@@ -161,8 +161,9 @@ static Status PublishWorkerSlots(void) {
     }
     UTLT_Assert(UpfWorkerRegistryPublish(config) == 0, return STATUS_ERROR,
                 "Cannot publish worker slots; restart manager/UPF-C between configurations");
-    UTLT_Info("Configured %u worker slots (min=%u max=%u RX threshold=%u); all slots are INACTIVE",
-               config->slot_count, config->min_workers, config->max_workers, config->rx_queue_threshold);
+    UTLT_Info("Configured %u worker slots (min=%u max=%u RX threshold=%u sample_ms=%u consecutive=%u); all slots are INACTIVE",
+               config->slot_count, config->min_workers, config->max_workers, config->rx_queue_threshold,
+               config->queue_sample_interval_ms, config->queue_consecutive_samples);
     return STATUS_OK;
 }
 

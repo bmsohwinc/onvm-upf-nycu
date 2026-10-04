@@ -58,6 +58,7 @@ static uint8_t worker_keep_running;
 static struct rte_mbuf *next_rx[RTE_MAX_ETHPORTS];
 
 int rte_errno;
+static void rte_pause(void) {}
 enum rte_proc_type_t rte_eal_process_type(void) { return RTE_PROC_PRIMARY; }
 const struct rte_memzone *rte_memzone_lookup(const char *name) { (void)name; return NULL; }
 const struct rte_memzone *rte_memzone_reserve(const char *name, size_t size, int socket, unsigned flags) {

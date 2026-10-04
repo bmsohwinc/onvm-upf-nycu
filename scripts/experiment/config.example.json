@@ -18,7 +18,7 @@
     "monitor_core": "19",
     "slots": 4,
     "queue_interval_s": 0.2,
-    "queue_threshold": 1024,
+    "queue_threshold": 40,
     "timing": true
   },
   "ue": {

@@ -45,8 +45,9 @@ and their SMT siblings. Enable only the collectors needed for a given trial.
 
 ## Fixed-session experiment
 
-Set `max_workers: 2`. Admit UE1, load its worker above the queue threshold, then
-admit UE2. Verify different admitted slots and both READY. Stop setup traffic,
+Set `max_workers: 2`. Admit UE1, load its worker above the queue threshold, wait
+for proactive scale-out and slot 1 READY, then admit UE2 while UE1 stays loaded.
+Verify different admitted slots and both READY. Stop setup traffic,
 retain both sessions, and wait for RX/TX queues to drain. Prestarting two workers
 alone does not guarantee separate session placement.
 
@@ -104,7 +105,7 @@ Rejected pending admissions and startup failures handled by `fail_start` log
 measurements. Immediate rejection before admission enqueue is not timed.
 
 ```sh
-grep -E 'Spawned UPF-U|UPF-U slot=.*READY|Admitted SEID|Admission failed|startup failed' upfc.log
+grep -E 'Scale-out trigger|Spawned UPF-U|UPF-U slot=.*READY|Admission received|Admitted SEID|Admission failed|startup failed' upfc.log
 ```
 
 - `packets` counts actual dequeues, including packets subsequently retained or
