@@ -20,12 +20,66 @@ Edit `lab.json` on each node. `${LAB_HOME}` expands to the invoking user's home
 the actual **dynamic scaling** UPF-C YAML. The source-tree `upfcfg.yaml` is not
 currently a dynamic worker configuration. Set `max_workers: 2` for this test.
 
-The example reproduces your supplied MAC/IP/TEID/rate/size values. **Check the
-CN PCI allowlist and portmask:** your supplied manager command names two devices
-and defaults to mask `3`. Two dynamic workers require their configured N3/N6
-ports (four distinct DPDK ports). Populate the actual allowlist and corresponding
-mask; do not guess PCI addresses or infer DPDK port IDs from VF indices. Set
-`cn.slots` to cover all configured slots that may appear in the UPF-C log.
+UPF-C uses ONVM manual core assignment (`-m`) to retain the core selected by
+`cn.upfc_eal` (`-l 7` in the example). Reserve that core for UPF-C: it must be
+enabled by `manager_nf_coremask` and absent from worker slots and control NF
+core assignments. EAL `-l` alone does not prevent ONVM from choosing another
+core, potentially occupying worker slot 0's core before slot validation.
+
+The example manager NF mask `0xFFFF8` enables cores 3–19, covering workers on
+3–6, UPF-C on 7, and the reference control-NF assignments through AUSF on 16
+and CHF on 17. The old `0xFFF8` mask enabled only 3–15 and rejected those two
+NFs. Update `cn.manager_nf_coremask` and `cn.upfc_eal` in existing `lab.json`
+files too; changing the example does not update them.
+
+All control NFs run from `${core_repo}/bin-sriov/<nf>` with `${core_repo}` as
+their working directory, matching the reference `run_nf` function. The custom
+SMF source lives in `${smf_repo}`, but its build output must be
+`${core_repo}/bin-sriov/smf`. The launcher does not compile binaries;
+`smf_repo` and `xio_repo` are exported as environment variables, not used to
+select alternative executables. After SMF source changes, rebuild on CN using
+the existing configured build environment, with SMF stopped:
+
+```bash
+export CORE_REPO="$HOME/L25GC-plus"
+export SMF_REPO="$HOME/smf-sriov"
+export XIO_REPO="$HOME/xio-scaling"
+(
+    set -e
+    cd "$SMF_REPO"
+    go mod edit -replace "github.com/nycu-ucr/onvmpoller=$XIO_REPO"
+    CGO_LDFLAGS_ALLOW='-Wl,.*' CGO_CFLAGS_ALLOW='^-mrtm$' \
+        CGO_ENABLED=1 go build -a -o "$CORE_REPO/bin-sriov/smf" ./cmd
+)
+```
+
+If ONVM static libraries or X-IO changed, follow the reference build procedure
+to rebuild the libraries and all nine control NFs before launching.
+
+The example reproduces your supplied MAC/IP/TEID/rate/size values. CN allows all
+eight VFs `0000:06:10.0` through `0000:06:10.7`, with hexadecimal port mask `ff`
+(DPDK ports 0–7). Even PCI functions are N3; odd functions are N6. With matching
+DPDK enumeration, the worker port pairs are:
+
+| Slot | N3 PCI function / DPDK port | N6 PCI function / DPDK port |
+| --- | --- | --- |
+| 0 | `0000:06:10.0` / 0 | `0000:06:10.1` / 1 |
+| 1 | `0000:06:10.2` / 2 | `0000:06:10.3` / 3 |
+| 2 | `0000:06:10.4` / 4 | `0000:06:10.5` / 5 |
+| 3 | `0000:06:10.6` / 6 | `0000:06:10.7` / 7 |
+
+Verify the actual manager PCI-to-port mapping, then set `n3_port` / `n6_port`
+in your UPF-C `scaling.worker_slots` accordingly. `n3_vf` / `n6_vf` are indices
+within their respective PFs, not PCI function numbers or DPDK port IDs; preserve
+the correct PF-relative indices. The generic UPF-C example uses a different
+port ordering and must be adapted. `cn.slots: 4` controls qcheck monitoring only;
+it does not create workers or change UPF-C's `max_workers`.
+
+If you already copied `lab.json`, update its `cn.manager_allow`,
+`cn.manager_portmask`, and `cn.slots` too. Updating the example does not change
+existing configurations. Restart manager and UPF-C with a fresh run ID after
+changing port configuration. The old allowlist included `0000:06:00.1`, which
+is not one of these VFs; a log showing only port 0 cannot satisfy an N3/N6 pair.
 
 Check UE IPs, TEIDs and N3 destinations against actual admitted sessions. The
 scripts deliberately do not infer them from UE order or modify live sessions.

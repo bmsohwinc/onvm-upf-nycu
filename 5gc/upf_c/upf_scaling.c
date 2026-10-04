@@ -29,7 +29,7 @@ enum { START_WAIT_REGISTRATION, START_WAIT_CLASSIFIER, START_WAIT_N3_ACK,
        START_ENABLE_POLLING, START_WAIT_POLL_ACK };
 static int starting = -1, startup_stage, control_ready, control_error;
 static uint32_t startup_sequence, probe_sequence;
-static uint64_t startup_deadline, next_teid;
+static uint64_t startup_deadline, startup_started, next_teid;
 
 enum { WAIT_SLOT, INSTALL_STEERING, WAIT_STEERING, WAIT_CLASSIFIER,
        ROLLBACK_STEERING, WAIT_ROLLBACK, RETIRE_RULES, WAIT_RETIREMENT, QUARANTINED };
@@ -41,8 +41,12 @@ static struct Pending {
     UpfSession *session;
     int slot, stage, responded;
     uint32_t sequence, version;
-    uint64_t deadline;
+    uint64_t deadline, admission_started, attach_started;
 } requests[MAX_PENDING];
+
+static double elapsed_ms(uint64_t start, uint64_t end) {
+    return (double)(end - start) * 1000.0 / rte_get_timer_hz();
+}
 
 static uint64_t after_ms(uint32_t ms) {
     return rte_get_timer_cycles() + (uint64_t)ms * rte_get_timer_hz() / 1000;
@@ -84,6 +88,7 @@ static int start_worker(void) {
         "--proc-type=secondary", "--file-prefix", Self()->scaling.file_prefix,
         "--no-pci", "--", "-r", service, "-m", "--", NULL};
     posix_spawnattr_t attr;
+    startup_started = rte_get_timer_cycles();
     int rc = posix_spawnattr_init(&attr);
     if (!rc) {
         rc = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
@@ -91,16 +96,20 @@ static int start_worker(void) {
         if (!rc) rc = posix_spawn(&children[slot], argv[0], NULL, &attr, argv, environ);
         posix_spawnattr_destroy(&attr);
     }
+    uint64_t spawn_finished = rte_get_timer_cycles();
     if (rc) {
         children[slot] = 0;
         __atomic_store_n(&r->reader_generation, 0, __ATOMIC_RELEASE);
         state(slot, UPF_WORKER_FAILED);
-        UTLT_Error("Spawn slot %d: %s", slot, strerror(rc));
+        UTLT_Error("Spawn slot %d: %s spawn_ms=%.3f", slot, strerror(rc),
+                   elapsed_ms(startup_started, spawn_finished));
         return -rc;
     }
     starting = slot; startup_stage = START_WAIT_REGISTRATION; startup_sequence = 0;
     startup_deadline = after_ms(Self()->scaling.startup_timeout_ms);
-    UTLT_Info("Spawned UPF-U slot=%d pid=%d service=%u core=%u", slot, children[slot], s->service_id, s->core);
+    UTLT_Info("Spawned UPF-U slot=%d pid=%d service=%u core=%u spawn_ms=%.3f",
+              slot, children[slot], s->service_id, s->core,
+              elapsed_ms(startup_started, spawn_finished));
     return slot;
 }
 
@@ -182,7 +191,8 @@ static void reap_workers(void) {
 }
 
 static void fail_start(int error) {
-    UTLT_Error("UPF-U slot %d startup failed: %s", starting, strerror(-error));
+    UTLT_Error("UPF-U slot %d startup failed: %s elapsed_ms=%.3f", starting, strerror(-error),
+               elapsed_ms(startup_started, rte_get_timer_cycles()));
     state(starting, UPF_WORKER_FAILED);
     if (children[starting] > 0) {
         kill(-children[starting], SIGTERM);
@@ -207,7 +217,9 @@ static void advance_start(void) {
         else {
             if (r->state == UPF_WORKER_FAILED) { starting = -1; return; }
             state(starting, UPF_WORKER_READY);
-            UTLT_Info("UPF-U slot=%d instance=%u READY", starting, r->instance_id);
+            uint64_t ready = rte_get_timer_cycles();
+            UTLT_Info("UPF-U slot=%d instance=%u READY ready_ms=%.3f", starting, r->instance_id,
+                      elapsed_ms(startup_started, ready));
             starting = -1;
             return;
         }
@@ -256,6 +268,9 @@ static void release_request(struct Pending *p) {
 
 static void reject(struct Pending *p, uint8_t cause) {
     if (!p->responded) {
+        UTLT_Warning("Admission failed: xid=%u xact=%u slot=%d cause=%u elapsed_ms=%.3f",
+                     p->transaction_id, p->xact_index, p->slot, cause,
+                     elapsed_ms(p->admission_started, rte_get_timer_cycles()));
         PfcpXact *x = transaction(p);
         if (x) {
             UpfRejectSessionEstablishment(p->message->buf, x, cause);
@@ -295,6 +310,7 @@ static void advance_request(struct Pending *p) {
         if (p->slot == -EAGAIN) return;
         if (p->slot < 0) { reject(p, PFCP_CAUSE_NO_RESOURCES_AVAILABLE); return; }
         if (g_upf_workers->runtime[p->slot].state != UPF_WORKER_READY) return;
+        p->attach_started = rte_get_timer_cycles();
         if (next_teid > Self()->scaling.teid_last) { reject(p, PFCP_CAUSE_NO_RESOURCES_AVAILABLE); return; }
         const UpfWorkerSlotConfig *s = &Self()->scaling.slots[p->slot];
         UpfWorker selected = {.service_id = s->service_id, .n3_port = s->n3_port, .n6_port = s->n6_port,
@@ -327,18 +343,24 @@ static void advance_request(struct Pending *p) {
             __atomic_load_n(&r->ack_version, __ATOMIC_ACQUIRE) < p->version) break;
         PfcpXact *x = transaction(p);
         if (!x) { reject(p, PFCP_CAUSE_NO_RESOURCES_AVAILABLE); break; }
+        uint64_t attached = rte_get_timer_cycles();
         /* Once a success response is cached, retain the session even if the
          * first send fails: PFCP retransmission will replay the same endpoint. */
         rc = UpfN4SendEstablishmentResponse(p->session, x, &message->pFCPSessionEstablishmentRequest,
                                            PFCP_CAUSE_REQUEST_ACCEPTED);
+        uint64_t response_finished = rte_get_timer_cycles();
         if (rc != STATUS_OK && x->step < 2) {
             reject(p, PFCP_CAUSE_NO_RESOURCES_AVAILABLE);
             break;
         }
         x->applicationPending = 0;
         if (x->timerHolding) TimerStart(x->timerHolding);
-        UTLT_Info("Admitted SEID=%lu slot=%d TEID=%u xid=%u xact=%u", p->session->upfSeid,
-                  p->slot, p->session->teid, p->transaction_id, p->xact_index);
+        UTLT_Info("Admitted SEID=%lu slot=%d TEID=%u xid=%u xact=%u worker_wait_ms=%.3f attach_ms=%.3f response_ms=%.3f admission_ms=%.3f response_rc=%d",
+                  p->session->upfSeid, p->slot, p->session->teid, p->transaction_id, p->xact_index,
+                  elapsed_ms(p->admission_started, p->attach_started),
+                  elapsed_ms(p->attach_started, attached),
+                  elapsed_ms(attached, response_finished),
+                  elapsed_ms(p->admission_started, response_finished), rc);
         release_request(p);
         break;
     }
@@ -390,13 +412,15 @@ int UpfScalingInit(void) {
 }
 
 int UpfScalingEnqueue(Bufblk *message, PfcpXact *xact) {
+    uint64_t admission_started = rte_get_timer_cycles();
     if (control_error) return control_error;
     for (unsigned i = 0; i < MAX_PENDING; i++) {
         struct Pending *p = &requests[i];
         if (p->message) continue;
         *p = (struct Pending){.message = message, .xact = xact, .peer = xact->gnode,
             .xact_index = xact->index, .transaction_id = xact->transactionId,
-            .slot = -1, .deadline = after_ms(Self()->scaling.startup_timeout_ms + 60000)};
+            .slot = -1, .deadline = after_ms(Self()->scaling.startup_timeout_ms + 60000),
+            .admission_started = admission_started};
         xact->applicationPending = 1;
         p->slot = select_worker(p);
         return 0;

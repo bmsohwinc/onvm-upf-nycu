@@ -148,7 +148,7 @@ class Lab:
         self.wait_pattern("manager", "Running RX thread for RX queue")
         env = {"ONVM_NF_TIMING_DIR": str(self.directory) if c["timing"] else ""}
         self.start_job("upfc", [f'{p["upf_repo"]}/build/5gc/l25gc_upf_c', *c["upfc_eal"],
-            "--", "-r", "2", "--", "-f", c["upfc_config"]], p["upf_repo"], env)
+            "--", "-r", "2", "-m", "--", "-f", c["upfc_config"]], p["upf_repo"], env)
         self.wait_pattern("upfc", r"UPF-U slot=0 instance=\d+ READY", timeout=90)
         env = {key.upper(): p[key] for key in ("core_repo", "upf_repo", "smf_repo", "xio_repo")}
         env["ONVM_NF_JSON"] = c["nf_config_dir"] + "/"

@@ -107,6 +107,9 @@ class QcheckTests(unittest.TestCase):
         self.assertEqual(rows[1]["log_ready_workers"], "2")
         self.assertEqual(rows[1]["rx_sum"], "2400")
         self.assertEqual(rows[1]["rx_min"], "1200")
+        self.assertEqual(rows[1]["slot1_rx_ge_threshold"], "1")
+        self.assertEqual(rows[1]["all_rx_ge_threshold"], "1")
+        self.assertEqual(rows[0]["slot1_rx_ge_threshold"], "")
         self.assertEqual(rows[1]["pool_in_use"], "11767")
         self.assertEqual(rows[0]["p0_rx_pps"], "")
         self.assertEqual(rows[1]["p0_ipackets_delta"], "50")
@@ -116,6 +119,7 @@ class QcheckTests(unittest.TestCase):
         self.assertEqual(rows[2]["p0_oerrors"], "")
         self.assertEqual(rows[2]["slot1_rx"], "")
         self.assertEqual(rows[2]["rx_sum"], "")
+        self.assertEqual(rows[2]["all_rx_ge_threshold"], "")
         self.assertEqual(rows[2]["sampled_rx_count"], "1")
         self.assertIn("Unavailable: /ring/info,MProc_Client_17_RX", warnings)
 
@@ -124,6 +128,54 @@ class QcheckTests(unittest.TestCase):
         self.assertEqual(rows[0]["nf9_rx"], "1200")
         self.assertEqual(rows[0]["nf2_tx"], "0")
         self.assertEqual(rows[0]["log_ready_workers"], "")
+
+    def test_watch_keeps_csv_clean_and_reports_affinity(self):
+        rows, events = self.capture(["2", "--watch", "--threshold", "1200", "--count", "2"], Telemetry())
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["rx_threshold"], "1200")
+        self.assertIn("allowed_cpus=", events)
+        self.assertIn("RX_HIGH nf2 instance=2 rx=1200 >= threshold=1200", events)
+        self.assertEqual(events.count("RX_HIGH"), 1)
+        self.assertEqual(events.count("ALL_SAMPLED_HIGH workers="), 1)
+        self.assertIn("STATUS nf2(nf2): rx=1200 tx=0 peak=1200 HIGH", events)
+
+    def test_threshold_transitions_late_worker_missing_data_and_peak(self):
+        monitor = qcheck.QueueMonitor(["slot0", "slot1"], 1024, 1)
+
+        def sample(elapsed, first, second, state="ready"):
+            row = {"elapsed_s": elapsed, "time_ns": 1790402819000000000 + int(elapsed * 1e9),
+                   "slot0_state": "ready", "slot0_instance": 2, "slot0_tx": 0,
+                   "slot1_state": state, "slot1_instance": 9 if state == "ready" else "", "slot1_tx": 0}
+            values = []
+            for label, rx in (("slot0", first), ("slot1", second)):
+                if row[f"{label}_state"] == "ready":
+                    values.append(rx)
+                    if rx is not None:
+                        row[f"{label}_rx"] = rx
+                        row[f"{label}_rx_ge_threshold"] = int(rx >= 1024)
+            if all(v is not None for v in values):
+                row["all_rx_ge_threshold"] = int(min(values) >= 1024)
+            monitor.update(row)
+
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            sample(0, 0, None, "unseen")
+            sample(.1, 1024, None, "unseen")  # Equality triggers, inactive slot excluded.
+            sample(.2, 1500, None, "unseen")  # No repeated HIGH event.
+            sample(.3, 1000, 1200)  # New worker high, old worker low: not all high.
+            sample(1.1, 0, None)  # Missing expected worker data is not a low reading.
+            sample(1.2, 0, 0)
+        events = output.getvalue()
+        self.assertEqual(events.count("RX_HIGH slot0"), 1)
+        self.assertEqual(events.count("RX_HIGH slot1"), 1)
+        self.assertEqual(events.count("ALL_SAMPLED_HIGH workers="), 1)
+        self.assertIn("rx=1024 >= threshold=1024", events)
+        self.assertIn("RX_LOW slot0 instance=2 rx=1000", events)
+        self.assertIn("RX_UNKNOWN slot1 instance=9", events)
+        self.assertNotIn("RX_LOW slot1", events)
+        self.assertIn("rx=0 tx=0 peak=1500 below", events)
+        self.assertIn("slot1(nf9): RX unavailable", events)
+        self.assertIn("+1.100s", events)
 
     def test_missing_telemetry_fails_before_csv(self):
         telemetry = Telemetry()
@@ -170,7 +222,8 @@ class QcheckTests(unittest.TestCase):
     def test_invalid_arguments(self):
         for args in ([], ["2", "2"], ["2", "--interval", "nan"],
                      ["--upfc-log", "upfc.log", "--slots", "0"],
-                     ["2", "--upfc-log", "upfc.log"]):
+                     ["2", "--upfc-log", "upfc.log"], ["2", "--threshold", "0"],
+                     ["2", "--status-interval", "nan"]):
             with self.subTest(args=args), self.assertRaises(SystemExit):
                 self.capture(args, Telemetry())
 

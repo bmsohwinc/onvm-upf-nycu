@@ -81,6 +81,32 @@ storage after the experiment, before reboot. Stop qcheck with Ctrl-C when done.
 
 ## Measurements and limits
 
+UPF-C also appends lifecycle durations to its timestamped `Spawned UPF-U`,
+`UPF-U ... READY`, and `Admitted SEID` log lines. These measurements are always
+available at info log level and do not require `ONVM_NF_TIMING_DIR`:
+
+| Field | Interval (milliseconds) |
+| --- | --- |
+| `spawn_ms` | Spawn-attribute setup through process creation and attribute cleanup; excludes worker initialization. |
+| `ready_ms` | Same start through UPF-C marking the worker READY, including registration, classifier acknowledgement, steering and polling enablement. |
+| `worker_wait_ms` | Entry to `UpfScalingEnqueue` through observing the selected worker READY; includes placement, event-loop scheduling, and any worker startup wait. |
+| `attach_ms` | Start of session installation on that ready worker through observing successful steering and its classifier acknowledgement. |
+| `response_ms` | From that attachment completion through return of the establishment-response function. |
+| `admission_ms` | Admission enqueue through return of the establishment-response function; sum of the preceding three session intervals, subject to rounding. |
+
+Durations use DPDK's monotonic timer cycles, not differences between wall-clock
+log timestamps. Session timing starts after PFCP parsing/transaction processing;
+it excludes SMF/UE signalling latency and does not confirm remote receipt of the
+response. `response_rc` records the response function's status: a cached success
+response can retain an admitted session even if its first transmission fails.
+Rejected pending admissions and startup failures handled by `fail_start` log
+`elapsed_ms` separately; do not treat those as successful attachment/readiness
+measurements. Immediate rejection before admission enqueue is not timed.
+
+```sh
+grep -E 'Spawned UPF-U|UPF-U slot=.*READY|Admitted SEID|Admission failed|startup failed' upfc.log
+```
+
 - `packets` counts actual dequeues, including packets subsequently retained or
   dropped by the handler. It is not the handler's return-to-TX count. Interval
   counts also include polls, nonempty bursts and full bursts.
