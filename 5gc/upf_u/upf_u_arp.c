@@ -429,12 +429,11 @@ attach_l2_or_arp(struct rte_mbuf *pkt,
         return -1;
 
     /* Port MACs are cached at startup; avoid a shared memzone lookup per packet. */
-    // if (out_port == g_n6_port)
-    //     local_mac = g_cn_dn_eth;
-    // else if (out_port == g_n3_port)
-    //     local_mac = g_cn_ue_eth;
-    // else 
-    if (UpfU_GetMac(out_port, &local_mac) < 0)
+    if (out_port == g_n6_port)
+        local_mac = g_cn_dn_eth;
+    else if (out_port == g_n3_port)
+        local_mac = g_cn_ue_eth;
+    else if (UpfU_GetMac(out_port, &local_mac) < 0)
         return -1;
 
     rte_ether_addr_copy(&local_mac, &eth_hdr->src_addr);

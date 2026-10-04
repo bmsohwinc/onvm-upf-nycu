@@ -52,6 +52,11 @@ Status UTLT_SetReportCaller(unsigned int flag) {
     return STATUS_OK;
 }
 
+/* Allow callers to skip expensive arguments before entering the logger. */
+int UTLT_LogEnabled(int level) {
+    return level <= __atomic_load_n(&g_utlt_min_level, __ATOMIC_ACQUIRE);
+}
+
 int UTLT_LogPrint(int level, const char *filename, const int line, 
                   const char *funcname, const char *fmt, ...) {
     static char buffer[MAX_SIZE_OF_BUFFER];

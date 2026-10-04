@@ -17,6 +17,7 @@ Status UTLT_SetReportCaller(unsigned int reportCaller);
 
 const char *UTLT_StrStatus(Status status);
 
+int UTLT_LogEnabled(int level);
 int UTLT_LogPrint(int level, const char *filename, const int line,
                   const char *funcname, const char *fmt, ...);
 
@@ -52,7 +53,8 @@ enum ReportCaller {
 #define UTLT_Debug(fmt, ...) \
     UTLT_LogPrint(LOG_DEBUG, __FILENAME__, __LINE__, __func__, fmt, ## __VA_ARGS__)
 #define UTLT_Trace(fmt, ...) \
-    UTLT_LogPrint(LOG_TRACE, __FILENAME__, __LINE__, __func__, fmt, ## __VA_ARGS__)
+    (UTLT_LogEnabled(LOG_TRACE) ? \
+        UTLT_LogPrint(LOG_TRACE, __FILENAME__, __LINE__, __func__, fmt, ## __VA_ARGS__) : STATUS_OK)
 
 #define UTLT_Assert(cond, expr, fmt, ...) \
     if (!(cond)) { \
