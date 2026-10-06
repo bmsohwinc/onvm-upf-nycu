@@ -21,7 +21,8 @@ the actual **dynamic scaling** UPF-C YAML. The source-tree `upfcfg.yaml` is not
 currently a dynamic worker configuration. Set `max_workers: 2` for this test.
 For the [proactive policy](../../5gc/upf_c/README.md), set the YAML's
 `rx_queue_threshold: 40`, `queue_sample_interval_ms: 10` and
-`queue_consecutive_samples: 3`. Match `cn.queue_threshold` in `lab.json` to 40;
+`queue_window_samples: 10` (replace the obsolete `queue_consecutive_samples` key).
+Match `cn.queue_threshold` in `lab.json` to 40;
 this JSON field affects qcheck's display only, not scaling decisions.
 
 UPF-C uses ONVM manual core assignment (`-m`) to retain the core selected by

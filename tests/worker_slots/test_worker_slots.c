@@ -87,12 +87,12 @@ int main(void) {
     UpfScalingConfig config = Parse(&doc, root, 1);
     assert(config.slot_count == 2 && config.min_workers == 1 && config.max_workers == 2);
     assert(config.rx_queue_threshold == 40 && config.teid_first == 0x1001 && config.teid_last == UINT32_MAX);
-    assert(config.queue_sample_interval_ms == 10 && config.queue_consecutive_samples == 3);
+    assert(config.queue_sample_interval_ms == 10 && config.queue_window_samples == 10);
     assert(config.slots[0].service_id == 14 && config.slots[1].n6_port == 3);
     Pair(&doc, root, "queue_sample_interval_ms", "20");
-    Pair(&doc, root, "queue_consecutive_samples", "5");
+    Pair(&doc, root, "queue_window_samples", "5");
     UpfScalingConfig custom = Parse(&doc, root, 1);
-    assert(custom.queue_sample_interval_ms == 20 && custom.queue_consecutive_samples == 5);
+    assert(custom.queue_sample_interval_ms == 20 && custom.queue_window_samples == 5);
     Pair(&doc, root, "teid_first", "0xfffffffe");
     Pair(&doc, root, "teid_last", "4294967295");
     Parse(&doc, root, 1);
@@ -102,12 +102,23 @@ int main(void) {
 
     const char *bad_keys[] = {"min_workers", "max_workers", "max_workers", "rx_queue_threshold",
                              "rx_queue_threshold", "teid_first", "teid_last", "spawn_cooldown_ms",
-                             "queue_sample_interval_ms", "queue_consecutive_samples"};
-    const char *bad_values[] = {"0", "0", "3", "0", "-1", "4294967296", "4096", "1000", "0", "0"};
+                             "queue_sample_interval_ms", "queue_window_samples", "queue_window_samples",
+                             "queue_window_samples", "queue_consecutive_samples"};
+    const char *bad_values[] = {"0", "0", "3", "0", "-1", "4294967296", "4096", "1000", "0", "0",
+                               "1025", "-1", "3"};
     for (size_t i = 0; i < sizeof(bad_keys) / sizeof(bad_keys[0]); i++) {
         root = Config(&doc, 2, NULL, NULL);
         Pair(&doc, root, bad_keys[i], bad_values[i]);
         Parse(&doc, root, 0);
+        yaml_document_delete(&doc);
+    }
+    unsigned windows[] = {1, UPF_MAX_QUEUE_WINDOW_SAMPLES};
+    for (unsigned i = 0; i < sizeof(windows) / sizeof(windows[0]); i++) {
+        char value[16];
+        snprintf(value, sizeof(value), "%u", windows[i]);
+        root = Config(&doc, 2, NULL, NULL);
+        Pair(&doc, root, "queue_window_samples", value);
+        assert(Parse(&doc, root, 1).queue_window_samples == windows[i]);
         yaml_document_delete(&doc);
     }
     const char *slot_keys[] = {"service_id", "core", "n3_port", "n6_vf", "n3_ip", "n3_ip",

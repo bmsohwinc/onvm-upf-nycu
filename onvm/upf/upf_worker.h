@@ -13,8 +13,9 @@ extern "C" {
 #define UPF_MAX_WORKERS 32
 #define UPF_WORKER_PATH_LEN 512
 #define MZ_UPF_WORKERS "UPF_WORKERS"
-#define UPF_WORKERS_ABI_VERSION 5
+#define UPF_WORKERS_ABI_VERSION 6
 #define UPF_MAX_SESSION_RULES 1024
+#define UPF_MAX_QUEUE_WINDOW_SAMPLES 1024
 
 /* A configured slot reserves resources; its array index is the slot ID.
  * Ports are DPDK port IDs. VF indices are relative to their respective PF.
@@ -35,9 +36,9 @@ typedef struct {
     uint16_t slot_count;         /* Zero disables dynamic worker mode. */
     uint16_t min_workers;
     uint16_t max_workers;
-    uint32_t rx_queue_threshold; /* Scale out when all READY RX queues exceed it. */
+    uint32_t rx_queue_threshold; /* Scale out when all READY RX averages exceed it. */
     uint32_t queue_sample_interval_ms;
-    uint32_t queue_consecutive_samples;
+    uint32_t queue_window_samples; /* Sliding average, 1..UPF_MAX_QUEUE_WINDOW_SAMPLES. */
     uint32_t teid_first;         /* Per-session allocation range, not per-worker. */
     uint32_t teid_last;
     char worker_binary[UPF_WORKER_PATH_LEN];

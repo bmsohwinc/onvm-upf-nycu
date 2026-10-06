@@ -36,9 +36,9 @@ exclusive. The static configuration continues to use its original packet path.
 | `n3_ip`, `n6_ip` | Distinct, fixed IPv4 addresses for the slot. All its sessions share these IPs. |
 | `n3_peer_ip`, `n6_peer_ip` | gNB and DN next-hop IPv4 addresses; dynamic workers run without NAT. |
 | `min_workers`, `max_workers` | Initial worker count and process limit; defaults 1 and the slot count. |
-| `rx_queue_threshold` | Packets; default 40. All READY queues must be strictly above it for consecutive sample rounds. |
+| `rx_queue_threshold` | Packets; default 40. Every READY worker's window-average RX backlog must strictly exceed it. |
 | `queue_sample_interval_ms` | Sampling interval; default 10 ms. |
-| `queue_consecutive_samples` | Consecutive qualifying rounds before starting one worker; default 3. |
+| `queue_window_samples` | Sliding window size per worker; default 10, range 1..1024. A full window is required. |
 | `teid_first`, `teid_last` | Global, monotonically allocated per-session UL TEID range; defaults `0x1001` through `0xffffffff`. No reuse on failed attempts. |
 | `worker_binary` | Absolute executable path to `l25gc_upf_u` on the CN. |
 | `file_prefix` | Same EAL namespace as manager and UPF-C; default `rte`. |
@@ -47,21 +47,26 @@ exclusive. The static configuration continues to use its original packet path.
 Remove `dn_route_helper`, `dn_host` and `dn_interface` from older configurations;
 these keys are no longer accepted. DN routing is configured manually, once per
 UE subnet, and is not part of the worker configuration or admission ACKs.
+Replace `queue_consecutive_samples` with `queue_window_samples`; the old key is
+rejected. At the default sampling interval, 10 samples cover roughly 100 ms.
 
 The NF RX ring is sized at **4096 entries (4095 usable)**; TX rings remain at
 65536 entries (65535 usable), and 32 is the packet burst size. The shared
 dataplane pool also limits occupancy (`NUM_MBUFS=32767`). The configured
 threshold must be below usable RX capacity and the mbuf count. Periodic sampling
-starts one unused slot when all READY workers remain above threshold for the
-configured number of samples. Only one worker starts at a time, up to
-`max_workers`. Admission always selects the least-queued READY worker and never
+starts one unused slot when every READY worker's average over its last
+`queue_window_samples` readings exceeds the threshold. Missing READY readings,
+missed intervals and worker identity/membership changes reset the windows;
+see the [policy README](../../5gc/upf_c/README.md) for exact behavior. Only one
+worker starts at a time, up to `max_workers`; sampling continues at that limit.
+Admission always selects the least-queued READY worker and never
 spawns. If none is READY, it waits within the request timeout. A brief lock
 conflict defers the admission read; queues are not subsequently resampled for
 an already selected session.
 
 ## Setup
 
-1. Rebuild manager and all NFs together. The registry ABI is now **5**, and the
+1. Rebuild manager and all NFs together. The registry ABI is now **6**, and the
    shared session/PFCP layouts changed. Restart the whole deployment between
    configurations; attaching a replacement UPF-C to a live run is unsupported.
 2. Follow the [PF/VF preparation](README.md) for every configured slot. Create

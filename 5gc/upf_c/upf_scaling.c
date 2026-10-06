@@ -31,7 +31,6 @@ static int starting = -1, startup_stage, control_ready, control_error;
 static uint32_t startup_sequence, probe_sequence;
 static uint64_t startup_deadline, startup_started, next_teid;
 static uint64_t last_queue_sample;
-static uint32_t overloaded_samples;
 
 enum { WAIT_SLOT, INSTALL_STEERING, WAIT_STEERING, WAIT_CLASSIFIER,
        ROLLBACK_STEERING, WAIT_ROLLBACK, RETIRE_RULES, WAIT_RETIREMENT, QUARANTINED };
@@ -117,6 +116,7 @@ static int start_worker(void) {
 
 struct QueueSample {
     uint16_t slot, instance;
+    uint32_t generation;
     unsigned count, capacity;
 };
 
@@ -132,6 +132,7 @@ static int sample_queues(struct QueueSample samples[UPF_MAX_WORKERS]) {
         unsigned count = rte_ring_count(nf->rx_q);
         samples[sample_count].slot = i;
         samples[sample_count].instance = r->instance_id;
+        samples[sample_count].generation = r->generation;
         samples[sample_count].count = count;
         samples[sample_count++].capacity = rte_ring_get_capacity(nf->rx_q);
     }
@@ -139,27 +140,77 @@ static int sample_queues(struct QueueSample samples[UPF_MAX_WORKERS]) {
     return sample_count;
 }
 
+/* Complete rounds share a cursor; each worker has its own history and sum.
+ * History stays private to UPF-C and needs no allocation in the event loop. */
+static struct QueueWindow {
+    unsigned values[UPF_MAX_QUEUE_WINDOW_SAMPLES];
+    uint64_t sum;
+    uint32_t generation;
+    uint16_t instance;
+} queue_windows[UPF_MAX_WORKERS];
+static uint32_t queue_samples, queue_next, queue_ready_mask;
+
+static void reset_queue_windows(void) {
+    queue_samples = queue_next = queue_ready_mask = 0;
+    /* Sums are cleared on the first sample; old values are overwritten before
+     * they can be subtracted. No need to clear the whole history buffer. */
+}
+
 static void sample_load(void) {
     const UpfScalingConfig *c = &Self()->scaling;
     uint64_t now = rte_get_timer_cycles();
-    if (now - last_queue_sample < (uint64_t)c->queue_sample_interval_ms * rte_get_timer_hz() / 1000) return;
+    uint64_t interval = (uint64_t)c->queue_sample_interval_ms * rte_get_timer_hz() / 1000;
+    uint64_t elapsed = now - last_queue_sample;
+    if (elapsed < interval) return;
     last_queue_sample = now;
-    if (!control_ready || control_error || starting >= 0 || live_count() >= c->max_workers) {
-        overloaded_samples = 0;
+    if (!control_ready || control_error || starting >= 0) {
+        reset_queue_windows();
         return;
     }
+    /* A missed interval invalidates history; never invent catch-up samples. */
+    if (elapsed >= 2 * interval) reset_queue_windows();
     struct QueueSample samples[UPF_MAX_WORKERS];
     int count = sample_queues(samples);
-    if (count <= 0) { overloaded_samples = 0; return; }
-    unsigned min_rx = UINT32_MAX;
+    if (count <= 0) { reset_queue_windows(); return; }
+    uint32_t ready_mask = 0, sampled_mask = 0;
+    int changed = 0;
+    for (uint16_t i = 0; i < c->slot_count; i++)
+        if (g_upf_workers->runtime[i].state == UPF_WORKER_READY) ready_mask |= UINT32_C(1) << i;
     for (int i = 0; i < count; i++) {
-        if (samples[i].count < min_rx) min_rx = samples[i].count;
+        const struct QueueSample *s = &samples[i];
+        const struct QueueWindow *w = &queue_windows[s->slot];
+        sampled_mask |= UINT32_C(1) << s->slot;
+        changed |= w->generation != s->generation || w->instance != s->instance;
     }
-    if (min_rx <= c->rx_queue_threshold) { overloaded_samples = 0; return; }
-    if (++overloaded_samples < c->queue_consecutive_samples) return;
-    overloaded_samples = 0;
-    UTLT_Info("Scale-out trigger: ready=%d min_rx=%u threshold=%u samples=%u interval_ms=%u",
-              count, min_rx, c->rx_queue_threshold, c->queue_consecutive_samples, c->queue_sample_interval_ms);
+    /* sample_queues() may omit a READY worker whose NF/ring is unavailable.
+     * Admission can use the others; scaling requires the entire READY set. */
+    if (sampled_mask != ready_mask) { reset_queue_windows(); return; }
+    if (changed || ready_mask != queue_ready_mask) reset_queue_windows();
+    queue_ready_mask = ready_mask;
+
+    uint64_t min_sum = UINT64_MAX;
+    for (int i = 0; i < count; i++) {
+        const struct QueueSample *s = &samples[i];
+        struct QueueWindow *w = &queue_windows[s->slot];
+        if (!queue_samples) {
+            w->sum = 0;
+            w->generation = s->generation;
+            w->instance = s->instance;
+        }
+        if (queue_samples == c->queue_window_samples) w->sum -= w->values[queue_next];
+        w->values[queue_next] = s->count;
+        w->sum += s->count;
+        if (w->sum < min_sum) min_sum = w->sum;
+    }
+    queue_next = (queue_next + 1) % c->queue_window_samples;
+    if (queue_samples < c->queue_window_samples) queue_samples++;
+    if (queue_samples < c->queue_window_samples || live_count() >= c->max_workers) return;
+    /* Compare sums to preserve fractional averages at the strict threshold. */
+    if (min_sum <= (uint64_t)c->rx_queue_threshold * c->queue_window_samples) return;
+    UTLT_Info("Scale-out trigger: ready=%d min_rx_avg=%.3f threshold=%u window_samples=%u interval_ms=%u",
+              count, (double)min_sum / c->queue_window_samples, c->rx_queue_threshold,
+              c->queue_window_samples, c->queue_sample_interval_ms);
+    reset_queue_windows();
     int slot = start_worker();
     if (slot < 0) UTLT_Warning("Scale-out spawn deferred/failed: error=%d", slot);
 }

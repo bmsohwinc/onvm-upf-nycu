@@ -7,10 +7,16 @@ in UPF-C's existing event loop. No new thread or forecasting model is used.
 
 - Start `min_workers` using the existing startup sequence.
 - Every `queue_sample_interval_ms`, read each READY worker's NF RX ring.
-- If **all** sampled READY queues are **strictly above** `rx_queue_threshold`
-  for `queue_consecutive_samples` consecutive rounds, start one unused slot.
-- A queue at/below threshold, an unavailable sample, or no READY workers resets
-  the count. Sampling for scale-out pauses during startup and at `max_workers`.
+- Keep the last `queue_window_samples` readings **per worker**. Once the window
+  is full, start one unused slot if **every READY worker's average RX backlog**
+  is **strictly above** `rx_queue_threshold`.
+- Each new reading replaces the oldest; a low/zero reading stays in the average.
+  An unavailable READY queue, a missed sampling interval (at least twice the
+  configured interval between reads), or a changed READY set/worker identity
+  resets all windows. Missing readings are never replaced with zeros.
+- Sampling pauses and history resets during startup or control errors. Sampling
+  continues at `max_workers`, but cannot start another worker. A spawn attempt
+  resets history, including when spawning is deferred or fails.
 - New sessions select the least-queued READY worker, even above threshold or
   while another worker starts. Equal queues choose the first slot. With no READY
   worker, admission waits within the existing request timeout.
@@ -29,15 +35,26 @@ min_workers: 1
 max_workers: 2               # Or up to the number of configured slots.
 rx_queue_threshold: 40
 queue_sample_interval_ms: 10
-queue_consecutive_samples: 3
+queue_window_samples: 10     # Number of samples, 1..1024.
 ```
 
-The last three values are also the parser defaults. Existing explicit thresholds
-(e.g. 1024) remain in effect until edited. Three samples at 10 ms give nominal
-20–30 ms detection after backlog rises; event-loop delays can extend this.
-40 packets is an experimental trigger, not a measured capacity guarantee.
+The last three values are also the parser defaults. Replace the old
+`queue_consecutive_samples` key in existing YAML; it is rejected with a migration
+message. Existing explicit thresholds (e.g. 1024) remain in effect until edited.
+Ten samples at 10 ms give a nominal 100 ms window; first-to-last sample spacing
+is 90 ms. This is not a fixed detection delay: crossing depends on the values
+already in the window, new backlog magnitude and event-loop timing. The threshold
+40 and window size 10 are experimental starting values, not calibrated capacity.
 
-The added configuration fields change the shared registry to **ABI 5**. Rebuild
+For each worker, `average = sum(last W readings) / W`. The comparison uses
+`sum > threshold * W`, preserving fractional averages. Averaging across workers
+would hide an idle worker behind a busy one, so it is not used. For example, with
+W=3 and threshold 40, `80, 0, 80` qualifies (53.33), whereas the old consecutive
+rule would reset at zero. A large isolated spike such as `0, 0, 150` also qualifies
+(50); averaging does not guarantee fewer burst-triggered spawns. Window size 1
+uses the latest sample directly.
+
+The changed configuration semantics use shared registry **ABI 6**. Rebuild
 manager, UPF-C and UPF-U together (`ninja -C build` on CN), rebuild control NFs
 linked to the changed ONVM libraries using your existing build procedure, and
 restart the deployment. Use a fresh experiment run and the usual PF filter
@@ -52,7 +69,7 @@ Info-level logs provide:
 
 | Marker/field | Meaning |
 | --- | --- |
-| `Scale-out trigger` | Last qualifying sample: READY count, minimum RX backlog, threshold, sample count and interval. |
+| `Scale-out trigger` | READY count, `min_rx_avg` (minimum of per-worker window averages), threshold, `window_samples` and interval. |
 | `Spawned UPF-U ... spawn_ms` | Process-creation time; excludes worker initialization. |
 | `UPF-U ... READY ready_ms` | Full startup through registration, classifier ACK, N3 steering and manager polling ACK. **Use this as worker creation-to-ready time.** |
 | `Admission received ... xid ... xact` | PFCP request entered UPF-C admission, after parsing. |
@@ -83,9 +100,10 @@ verify placement. Scale-out does not remove an existing worker's backlog or a
 ## Local verification
 
 `python3 tests/proactive_scaling/run.py` compiles the production sampler and
-placement code with mock queues/time and ASan/UBSan. It checks sampling intervals,
-consecutive overload/reset, startup/worker limits and READY-only admission.
-The policy and manager-polling mock suites pass locally with ASan/UBSan.
-The [worker-slot tests](../../tests/worker_slots/README.md) cover YAML defaults,
-overrides and validation, but could not run locally because `yaml.h` is missing.
-Full build/startup/PFCP/NIC validation still needs the CN testbed.
+placement code with mock queues/time and ASan/UBSan. It checks full-window warmup,
+rolling eviction, per-worker averages, strict/fractional thresholds, configurable
+window bounds, missing/stale samples, worker changes, startup/process limits and
+READY-only admission. The [worker-slot tests](../../tests/worker_slots/README.md)
+cover YAML defaults, overrides, bounds, obsolete-key rejection and registry ABI
+validation; they require libyaml development files. Full build/startup/PFCP/NIC
+validation still needs the CN testbed.
