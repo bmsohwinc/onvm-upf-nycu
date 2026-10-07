@@ -22,6 +22,14 @@ currently a dynamic worker configuration. Set `max_workers: 2` for this test.
 For the [proactive policy](../../5gc/upf_c/README.md), set the YAML's
 `rx_queue_threshold: 40`, `queue_sample_interval_ms: 10` and
 `queue_window_samples: 10` (replace the obsolete `queue_consecutive_samples` key).
+Scale-down defaults are `scale_down_queue_threshold: 10`,
+`scale_down_hold_ms: 30000`, and `worker_stop_timeout_ms: 5000`.
+Release the UE's PDU session through normal signaling and verify `Deleted SEID`
+in `upfc.log`; stopping only pkt-gen leaves the session established. With all
+READY averages low, an empty extra worker should log STOPPING after the hold,
+then INACTIVE. Repeat scale-out to check reuse. A busy peer retains an idle spare,
+and a silent established session keeps its worker alive. qcheck follows these
+transitions and the new NF instance after respawn.
 Match `cn.queue_threshold` in `lab.json` to 40;
 this JSON field affects qcheck's display only, not scaling decisions.
 

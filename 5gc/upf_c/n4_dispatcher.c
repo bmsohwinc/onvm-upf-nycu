@@ -112,7 +112,6 @@ void UpfDispatcher(const Event *event) {
 
                 if (pfcpMessage->header.seid) {
                     session = UpfSessionFindBySeid(pfcpMessage->header.seid);
-                    UTLT_Assert(session, goto freeBuf, "Session not found");
                 } else {
                     UTLT_Assert(pfcpMessage->header.type == PFCP_SESSION_ESTABLISHMENT_REQUEST,
                                 goto freeBuf, "no SEID but not SESSION ESTABLISHMENT");
@@ -125,6 +124,23 @@ void UpfDispatcher(const Event *event) {
                 if (status == STATUS_EAGAIN) goto freeBuf;
                 UTLT_Assert(status == STATUS_OK, goto freeBuf, "PFCP transaction receive failed");
 
+                if (pfcpMessage->header.type == PFCP_SESSION_DELETION_REQUEST) {
+                    if (!session) {
+                        UpfN4SendDeletionResponse(0, xact, PFCP_CAUSE_SESSION_CONTEXT_NOT_FOUND);
+                        goto freeBuf;
+                    }
+                    if (Self()->scaling.slot_count) {
+                        if (UpfScalingDelete(bufBlk, xact, session) == 0) {
+                            pfcpMessage = NULL;
+                            bufBlk = NULL;
+                        } else {
+                            UpfN4SendDeletionResponse(session->smfSeid, xact, PFCP_CAUSE_REQUEST_REJECTED);
+                        }
+                        goto freeBuf;
+                    }
+                }
+                UTLT_Assert(session || pfcpMessage->header.type == PFCP_SESSION_ESTABLISHMENT_REQUEST,
+                            goto freeBuf, "Session not found");
                 if (!session) {
                     if (Self()->scaling.slot_count && pfcpMessage->header.type == PFCP_SESSION_ESTABLISHMENT_REQUEST) {
                         if (UpfScalingEnqueue(bufBlk, xact) == 0) {

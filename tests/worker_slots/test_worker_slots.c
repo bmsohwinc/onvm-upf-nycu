@@ -88,11 +88,18 @@ int main(void) {
     assert(config.slot_count == 2 && config.min_workers == 1 && config.max_workers == 2);
     assert(config.rx_queue_threshold == 40 && config.teid_first == 0x1001 && config.teid_last == UINT32_MAX);
     assert(config.queue_sample_interval_ms == 10 && config.queue_window_samples == 10);
+    assert(config.scale_down_queue_threshold == 10 && config.scale_down_hold_ms == 30000);
+    assert(config.worker_stop_timeout_ms == 5000);
     assert(config.slots[0].service_id == 14 && config.slots[1].n6_port == 3);
     Pair(&doc, root, "queue_sample_interval_ms", "20");
     Pair(&doc, root, "queue_window_samples", "5");
+    Pair(&doc, root, "scale_down_queue_threshold", "0");
+    Pair(&doc, root, "scale_down_hold_ms", "1000");
+    Pair(&doc, root, "worker_stop_timeout_ms", "2000");
     UpfScalingConfig custom = Parse(&doc, root, 1);
     assert(custom.queue_sample_interval_ms == 20 && custom.queue_window_samples == 5);
+    assert(custom.scale_down_queue_threshold == 0 && custom.scale_down_hold_ms == 1000);
+    assert(custom.worker_stop_timeout_ms == 2000);
     Pair(&doc, root, "teid_first", "0xfffffffe");
     Pair(&doc, root, "teid_last", "4294967295");
     Parse(&doc, root, 1);
@@ -103,9 +110,11 @@ int main(void) {
     const char *bad_keys[] = {"min_workers", "max_workers", "max_workers", "rx_queue_threshold",
                              "rx_queue_threshold", "teid_first", "teid_last", "spawn_cooldown_ms",
                              "queue_sample_interval_ms", "queue_window_samples", "queue_window_samples",
-                             "queue_window_samples", "queue_consecutive_samples"};
+                             "queue_window_samples", "queue_consecutive_samples",
+                             "scale_down_queue_threshold", "scale_down_queue_threshold",
+                             "scale_down_hold_ms", "worker_stop_timeout_ms"};
     const char *bad_values[] = {"0", "0", "3", "0", "-1", "4294967296", "4096", "1000", "0", "0",
-                               "1025", "-1", "3"};
+                               "1025", "-1", "3", "40", "41", "0", "0"};
     for (size_t i = 0; i < sizeof(bad_keys) / sizeof(bad_keys[0]); i++) {
         root = Config(&doc, 2, NULL, NULL);
         Pair(&doc, root, bad_keys[i], bad_values[i]);

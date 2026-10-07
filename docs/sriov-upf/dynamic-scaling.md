@@ -1,10 +1,11 @@
-# Dynamic UPF-U scale-out
+# Dynamic UPF-U scaling
 
 Scope: new IPv4 sessions, multiple sessions per worker, and one UL TEID per
 session. UPF-C periodically samples worker RX rings to start workers ahead of
 new sessions; admissions select the least-queued READY worker. See the
 [proactive scaling README](../../5gc/upf_c/README.md) for the policy, configuration
-and timing logs. There is no forecasting, migration or scale-down.
+and timing logs. Session-free workers can stop after a low-load hold; there is
+no forecasting, migration or forced session expiry.
 The target is Intel X520/82599 and a Linux DN running iperf.
 
 ## Implementation phases
@@ -17,8 +18,8 @@ The target is Intel X520/82599 and a Linux DN running iperf.
    1.45 Mpps each without drops after the MAC/logger fixes. The periodic
    proactive policy still needs testbed verification.
 
-Phases 3–4 were implemented together. No tests were added for these phases,
-as requested.
+Phases 3–4 were implemented together. Current local checks are listed under
+Validation status below.
 
 ## Configuration
 
@@ -39,6 +40,9 @@ exclusive. The static configuration continues to use its original packet path.
 | `rx_queue_threshold` | Packets; default 40. Every READY worker's window-average RX backlog must strictly exceed it. |
 | `queue_sample_interval_ms` | Sampling interval; default 10 ms. |
 | `queue_window_samples` | Sliding window size per worker; default 10, range 1..1024. A full window is required. |
+| `scale_down_queue_threshold` | All READY averages must be at most this value; default 10, must be below the scale-up threshold. |
+| `scale_down_hold_ms` | Continuous low-load/session-free eligibility before stopping one worker; default 30000, positive. |
+| `worker_stop_timeout_ms` | Shutdown/manager cleanup deadline; default 5000, positive. Failure prevents slot reuse. |
 | `teid_first`, `teid_last` | Global, monotonically allocated per-session UL TEID range; defaults `0x1001` through `0xffffffff`. No reuse on failed attempts. |
 | `worker_binary` | Absolute executable path to `l25gc_upf_u` on the CN. |
 | `file_prefix` | Same EAL namespace as manager and UPF-C; default `rte`. |
@@ -58,7 +62,7 @@ starts one unused slot when every READY worker's average over its last
 `queue_window_samples` readings exceeds the threshold. Missing READY readings,
 missed intervals and worker identity/membership changes reset the windows;
 see the [policy README](../../5gc/upf_c/README.md) for exact behavior. Only one
-worker starts at a time, up to `max_workers`; sampling continues at that limit.
+worker starts or stops at a time, up to `max_workers`; sampling continues at that limit.
 Admission always selects the least-queued READY worker and never
 spawns. If none is READY, it waits within the request timeout. A brief lock
 conflict defers the admission read; queues are not subsequently resampled for
@@ -66,7 +70,7 @@ an already selected session.
 
 ## Setup
 
-1. Rebuild manager and all NFs together. The registry ABI is now **6**, and the
+1. Rebuild manager and all NFs together. The registry ABI is now **7**, and the
    shared session/PFCP layouts changed. Restart the whole deployment between
    configurations; attaching a replacement UPF-C to a live run is unsupported.
 2. Follow the [PF/VF preparation](README.md) for every configured slot. Create
@@ -122,7 +126,7 @@ an already selected session.
 ## Runtime sequence
 
 UPF-C's `user_actions` callback handles worker startup, child exit, manager ACKs,
-pending establishments and PFCP timer expiry. Process launch uses `posix_spawn`;
+pending establishments/deletions and PFCP timer expiry. Process launch uses `posix_spawn`;
 child status uses `waitpid(WNOHANG)`. No session waits in a blocking loop.
 Dynamic mode disables the separate PFCP timer thread; static mode retains it.
 Manager services lifecycle and steering requests every millisecond, independently
@@ -141,6 +145,22 @@ remain blocked from processing. Manager installs the N6 rule and acknowledges
 the local ioctl result; UPF-C waits for that ACK and the owner's classifier ACK,
 then caches the success response, enables session processing and sends the N3
 IP/TEID to SMF. Retransmissions reuse the same transaction and endpoint.
+
+For deletion, mark the session unavailable, remove its N6 rule, withdraw its
+classifier rules and wait for every reader. The owner then drops buffered packets
+and removes UE meter state before ACKing. Only then does UPF-C free the session
+and cache/send the deletion response; PFCP retries still work after the SEID
+lookup no longer finds a session. Merely stopping a traffic generator does not
+release the PDU session; confirm SMF deletion and the `Deleted SEID` log.
+
+To scale down, all READY averages must stay below/equal to the lower threshold
+for the hold duration, with no pending admission. The highest session-free READY
+slot is eligible, preserving `min_workers`; pending/failed cleanup counts as
+occupied. STOPPING excludes it from admission. Manager removes its N3 rule and
+ACKs disabling both VF polling routes; UPF-C waits for empty NF queues, sends
+SIGTERM and waits for process exit plus manager core/service release. The slot
+becomes INACTIVE and reusable with a new generation. Reuse also discards stale VF
+packets before enabling polling. Any failure leaves the slot FAILED.
 
 | Rule | Match/action | Lifetime/location |
 | --- | --- | --- |
@@ -168,14 +188,16 @@ UPF-C owns runtime state/generation/instance fields; each worker owns its
 registration and classifier ACK fields. Reader membership is installed before
 spawn and removed only after confirmed process exit. Inactive slots do not block
 reclamation. The shared NF lock protects ring lifetime during admission and
-periodic sampling reads.
+periodic sampling reads. Manager NF removal also waits for active RX/TX passes
+before freeing their rings; TX threads retain concurrent access to each other.
 
 There is one outstanding steering operation at a time, and its result must be
 consumed before the next submission. Polling ACKs remain separate from NIC
 ACKs. UPF-U continues to use RX/TX rings for all packets, including ARP.
 
-Up to 64 establishments can wait concurrently, each with a deadline of
-`startup_timeout_ms + 60000`. Worker or steering failures produce a PFCP rejection.
+Up to 64 establishments/deletions can wait concurrently. Establishments have a
+deadline of `startup_timeout_ms + 60000`; deletions have 60000 ms. Worker or
+steering failures produce a PFCP rejection.
 Submitted mailbox operations are consumed before rollback; they are never
 overwritten on timeout. Failed-session rollback removes its N6 filter,
 withdraws its PDRs, and waits for all readers before freeing resources.
@@ -183,15 +205,13 @@ If cleanup cannot be confirmed, the failed session stays inactive and retains
 its UE/TEID/resources until restart. The manual DN route is never modified.
 
 Failed worker slots stop being polled and are not reused; existing sessions are
-not moved. Started N3 filters and admitted-session N6 filters persist until
-operator cleanup with applications stopped. Before another run, clear old PF
-rules. The static DN subnet route can be reused across runs.
-The normal session-deletion/scale-down workflow is outside this implementation;
-dynamic-mode deletion requests return a PFCP rejection and retain the session.
+not moved. Successful deletion/scale-down removes its owned N6/N3 filters.
+Uncertain cleanup can leave filters installed; before another run, clear old PF
+rules with applications stopped. The static DN subnet route can be reused.
 
 ## Validation status
 
-The proactive sampler/placement and manager-polling mock suites pass locally
+The sampler/placement, deletion/scale-down and manager-polling mock suites pass locally
 with ASan/UBSan. YAML parser tests require libyaml headers, unavailable locally;
 the full Linux/DPDK build and hardware behavior require CN. Earlier testbed
 results cover the baseline forwarding path, not this periodic policy. Follow

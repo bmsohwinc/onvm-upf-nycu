@@ -171,6 +171,7 @@ typedef struct _UpfSession {
     list_t          *qer_list;
 
     uint32_t admission_pending; /* Atomic: UPF-U drops until establishment commits. */
+    uint32_t deletion_pending;  /* Atomic: block packets/events until retirement. */
     bool srr_flag;
 } UpfSession;
 

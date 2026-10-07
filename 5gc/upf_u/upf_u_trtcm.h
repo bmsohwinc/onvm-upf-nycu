@@ -110,6 +110,8 @@ ftSearch(uint32_t subnet);
 int
 findIndexByUeIpAddress(uint32_t ue_ip);
 
+void removeEntrybyUeIp(uint32_t ue_ip);
+
 void
 updateTokenbyIndex(int index);
 

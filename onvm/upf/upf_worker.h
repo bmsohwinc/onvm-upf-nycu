@@ -13,7 +13,7 @@ extern "C" {
 #define UPF_MAX_WORKERS 32
 #define UPF_WORKER_PATH_LEN 512
 #define MZ_UPF_WORKERS "UPF_WORKERS"
-#define UPF_WORKERS_ABI_VERSION 6
+#define UPF_WORKERS_ABI_VERSION 7
 #define UPF_MAX_SESSION_RULES 1024
 #define UPF_MAX_QUEUE_WINDOW_SAMPLES 1024
 
@@ -39,6 +39,9 @@ typedef struct {
     uint32_t rx_queue_threshold; /* Scale out when all READY RX averages exceed it. */
     uint32_t queue_sample_interval_ms;
     uint32_t queue_window_samples; /* Sliding average, 1..UPF_MAX_QUEUE_WINDOW_SAMPLES. */
+    uint32_t scale_down_queue_threshold;
+    uint32_t scale_down_hold_ms;
+    uint32_t worker_stop_timeout_ms;
     uint32_t teid_first;         /* Per-session allocation range, not per-worker. */
     uint32_t teid_last;
     char worker_binary[UPF_WORKER_PATH_LEN];
@@ -55,8 +58,14 @@ typedef enum {
     UPF_WORKER_INACTIVE = 0,
     UPF_WORKER_STARTING,
     UPF_WORKER_READY,
+    UPF_WORKER_STOPPING,
     UPF_WORKER_FAILED,
 } UpfWorkerState;
+
+typedef struct {
+    uint64_t seid;
+    uint32_t session_index, generation, version;
+} UpfSessionCleanup;
 
 typedef struct {
     uint32_t state;              /* Atomic publication point; UPF-C is sole writer. */
@@ -66,20 +75,25 @@ typedef struct {
     uint32_t registered_instance;/* UPF-U publishes after attaching its slot. */
     uint32_t ack_version;        /* UPF-U publishes at a classifier quiescent point. */
     uint32_t ack_generation;
+    UpfSessionCleanup cleanup_request;
+    uint32_t cleanup_request_seq, cleanup_consumed_seq; /* UPF-C owns requests. */
+    int32_t cleanup_result;                            /* UPF-U owns results. */
+    uint32_t cleanup_ack_seq;
 } UpfWorkerRuntime;
 
 typedef struct {
     uint32_t generation;         /* Nonzero, increases on each start of a slot. */
     uint16_t slot;
     uint16_t instance_id;
-    uint8_t enable;              /* Zero disables polling for rollback. */
+    uint8_t enable;              /* Zero disables polling for rollback/shutdown. */
 } UpfWorkerPollUpdate;
 
 typedef enum {
     UPF_STEER_PROBE = 1,
     UPF_STEER_N3_ADD,
     UPF_STEER_SESSION_ADD,
-    UPF_STEER_SESSION_DEL,       /* Roll back a failed establishment only. */
+    UPF_STEER_SESSION_DEL,
+    UPF_STEER_N3_DEL,
 } UpfSteerOperation;
 
 typedef struct {
@@ -128,6 +142,8 @@ int UpfWorkerPollRequest(const UpfWorkerPollUpdate *update, uint32_t *sequence);
 int UpfWorkerPollResult(uint32_t sequence, int32_t *result); /* -EINPROGRESS while pending. */
 int UpfSteerRequest(const UpfSteerUpdate *update, uint32_t *sequence);
 int UpfSteerResult(uint32_t sequence, int32_t *result);
+int UpfWorkerCleanupRequest(uint16_t slot, const UpfSessionCleanup *update, uint32_t *sequence);
+int UpfWorkerCleanupResult(uint16_t slot, uint32_t sequence, int32_t *result);
 
 static inline int UpfWorkerNfTryLock(void) {
     return g_upf_workers && !__atomic_exchange_n(&g_upf_workers->nf_lock, 1, __ATOMIC_ACQUIRE);

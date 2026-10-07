@@ -164,6 +164,8 @@ static Status PublishWorkerSlots(void) {
     UTLT_Info("Configured %u worker slots (min=%u max=%u RX average threshold=%u sample_ms=%u window_samples=%u); all slots are INACTIVE",
                config->slot_count, config->min_workers, config->max_workers, config->rx_queue_threshold,
                config->queue_sample_interval_ms, config->queue_window_samples);
+    UTLT_Info("Scale-down: RX average threshold=%u hold_ms=%u stop_timeout_ms=%u",
+              config->scale_down_queue_threshold, config->scale_down_hold_ms, config->worker_stop_timeout_ms);
     return STATUS_OK;
 }
 

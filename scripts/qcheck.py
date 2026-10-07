@@ -24,7 +24,8 @@ class WorkerLog:
 
     spawn = re.compile(r"Spawned UPF-U slot=(\d+) pid=\d+ service=(\d+)")
     ready = re.compile(r"UPF-U slot=(\d+) instance=(\d+) READY")
-    failed = re.compile(r"UPF-U slot (\d+) (?:exited|startup failed)")
+    lifecycle = re.compile(r"UPF-U slot=(\d+) (STOPPING|INACTIVE)")
+    failed = re.compile(r"UPF-U slot[ =](\d+) (?:exited|startup failed|stop failed|stop timed out)")
 
     def __init__(self, path, slots):
         self.path = path
@@ -53,7 +54,8 @@ class WorkerLog:
         self.pending = lines.pop()  # Do not consume a partially written event.
         for raw in lines:
             line = raw.decode("utf-8", errors="replace")
-            match = self.spawn.search(line) or self.ready.search(line) or self.failed.search(line)
+            match = (self.spawn.search(line) or self.ready.search(line) or
+                     self.lifecycle.search(line) or self.failed.search(line))
             if not match:
                 continue
             slot = int(match[1])
@@ -63,6 +65,10 @@ class WorkerLog:
                 self.workers[slot] = {"state": "starting", "service": int(match[2])}
             elif match.re is self.ready:
                 self.workers[slot].update(state="ready", instance=int(match[2]))
+            elif match.re is self.lifecycle:
+                self.workers[slot]["state"] = match[2].lower()
+                if match[2] == "INACTIVE":
+                    self.workers[slot].pop("instance", None)
             else:
                 self.workers[slot]["state"] = "failed"
 
@@ -142,7 +148,7 @@ class QueueMonitor:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("instances", type=int, nargs="*", help="explicit NF instance IDs (not services)")
-    parser.add_argument("--upfc-log", help="follow READY/spawn/exit events in this run's UPF-C INFO log")
+    parser.add_argument("--upfc-log", help="follow worker lifecycle events in this run's UPF-C INFO log")
     parser.add_argument("--slots", type=int, default=4, help="fixed slot columns in log mode (default: 4)")
     parser.add_argument("--ports", type=int, nargs="+", help="default: all DPDK ports")
     parser.add_argument("--interval", type=float, default=0.1)

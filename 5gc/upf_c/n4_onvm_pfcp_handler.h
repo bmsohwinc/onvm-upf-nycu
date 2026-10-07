@@ -41,6 +41,7 @@ Status UpfN4HandleSessionEstablishmentRequest(
 Status UpfN4HandleSessionModificationRequest(
         UpfSession *session, PfcpXact *xact, PFCPSessionModificationRequest *request);
 Status UpfN4HandleSessionDeletionRequest(UpfSession *session, PfcpXact *xact, PFCPSessionDeletionRequest *request);
+Status UpfN4SendDeletionResponse(uint64_t smf_seid, PfcpXact *xact, uint8_t cause);
 Status UpfN4HandleSessionReportResponse(
         UpfSession *session, PfcpXact *xact, PFCPSessionReportResponse *response);
 Status UpfN4HandleAssociationSetupRequest(PfcpXact *xact, PFCPAssociationSetupRequest *request);

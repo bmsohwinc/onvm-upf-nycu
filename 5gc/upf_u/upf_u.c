@@ -545,7 +545,8 @@ HandlePacketWithFar(struct rte_mbuf *pkt, UPDK_FAR *far, UPDK_QER *qer,
 
 static bool
 UpfSessionIsLocal(const UpfSession *session, const struct onvm_nf *nf) {
-    if (!session || __atomic_load_n(&session->admission_pending, __ATOMIC_ACQUIRE)) return false;
+    if (!session || __atomic_load_n(&session->admission_pending, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&session->deletion_pending, __ATOMIC_ACQUIRE)) return false;
     const UpfWorker *worker = &session->worker;
     if (!worker->service_id) return true;  /* Existing single-UPF-U mode */
     return worker->service_id == nf->service_id &&
@@ -1028,7 +1029,9 @@ msg_handler(void *msg_data, struct onvm_nf_local_ctx *nf_local_ctx) {
         struct onvm_nf *nf = nf_local_ctx->nf;
         int sess_idx = (int)(uintptr_t)e->arg0;
         if (sess_idx >= 0 && sess_idx < SESS_BUF_MAX_USERS &&
-            UpfSessionIsLocal(UpfGetSessionByIndex(sess_idx), nf)) {
+            UpfSessionIsLocal(UpfGetSessionByIndex(sess_idx), nf) &&
+            (g_worker_slot < 0 || (e->argc == 2 &&
+             UpfGetSessionByIndex(sess_idx)->upfSeid == (uint64_t)e->arg1))) {
             g_sess_buf[sess_idx].is_buffering = 0;
             uint32_t n = drain_session_batch(sess_idx, UINT32_MAX, nf);
             UTLT_Debug("EVENT drain: sess %d, sent %u pkts\n", sess_idx, n);
@@ -1038,6 +1041,30 @@ msg_handler(void *msg_data, struct onvm_nf_local_ctx *nf_local_ctx) {
     }
 
     if (e) rte_free(e);
+}
+
+/* Only this worker thread owns its shaper/meter state. ACK after purging it,
+ * at a packet-loop boundary, and only for the requested session lifetime. */
+static void cleanup_session(void) {
+    if (g_worker_slot < 0) return;
+    UpfWorkerRuntime *r = &g_upf_workers->runtime[g_worker_slot];
+    uint32_t seq = __atomic_load_n(&r->cleanup_request_seq, __ATOMIC_ACQUIRE);
+    if (seq == __atomic_load_n(&r->cleanup_ack_seq, __ATOMIC_RELAXED)) return;
+    UpfSessionCleanup request = r->cleanup_request;
+    int result = -ESTALE;
+    if (request.generation == g_worker_generation && request.session_index < SESS_BUF_MAX_USERS) {
+        if (g_cls_local.ver < request.version) return;
+        UpfSession *session = UpfGetSessionByIndex(request.session_index);
+        if (session->upfSeid == request.seid && session->worker.service_id == g_upfu_service_id &&
+            __atomic_load_n(&session->deletion_pending, __ATOMIC_ACQUIRE)) {
+            uint32_t ue = session->ueIpv4.addr4.s_addr;
+            upf_u_shaper_forget_ue(findIndexByUeIpAddress(ue));
+            removeEntrybyUeIp(ue);
+            result = 0;
+        }
+    }
+    r->cleanup_result = result;
+    __atomic_store_n(&r->cleanup_ack_seq, seq, __ATOMIC_RELEASE);
 }
 
 static uint64_t last_p = 0;
@@ -1053,6 +1080,7 @@ callback_handler(struct onvm_nf_local_ctx *nf_local_ctx) {
     nf = nf_local_ctx->nf;
     /* Apply classifier updates even when neither VF receives data. */
     UpfClsMaybeFlipAndAck();
+    cleanup_session();
     if (unlikely(!last_p)) last_p = rte_get_tsc_cycles();
     cur_p = rte_get_tsc_cycles();
 

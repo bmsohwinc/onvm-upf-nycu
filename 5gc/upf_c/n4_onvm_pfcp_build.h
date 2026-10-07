@@ -33,10 +33,9 @@ Status UpfN4BuildSessionEstablishmentResponse(
         PFCPSessionEstablishmentRequest *establishRequest);
 Status UpfN4BuildSessionModificationResponse(
         Bufblk **bufBlkPtr, uint8_t type, UpfSession *session,
-        PFCPSessionModificationRequest *modifyRequest);
+        PFCPSessionModificationRequest *modifyRequest, uint8_t cause);
 Status UpfN4BuildSessionDeletionResponse(
-        Bufblk **bufBlkPtr, uint8_t type, UpfSession *session,
-        PFCPSessionDeletionRequest *deletionRequest);
+        Bufblk **bufBlkPtr, uint64_t smf_seid, uint8_t cause);
 Status UpfN4BuildSessionReportRequestDownlinkDataReport (
         Bufblk **bufBlkPtr, uint8_t type, UpfSession *session, uint16_t pdrId);
 Status UpfN4BuildAssociationSetupResponse(

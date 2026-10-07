@@ -4,11 +4,14 @@
 
 #include <stdint.h>
 #include <rte_spinlock.h>
+#include <rte_rwlock.h>
 
 /* Serializes an RX pass with manager NF registration/removal. In particular,
  * a mapped RX ring cannot be freed while that pass is still using it.
  */
 extern rte_spinlock_t onvm_upf_lock;
+/* TX passes may run concurrently, but NF removal must wait for all of them. */
+extern rte_rwlock_t onvm_upf_tx_lock;
 
 /* Caller holds onvm_upf_lock. Sync runs before polling, after the previous
  * pass's NF buffers have been flushed. This implementation requires one RX thread.

@@ -75,7 +75,7 @@ int UpfWorkerRegistryAttach(void) {
 int UpfSteerRequest(const UpfSteerUpdate *update, uint32_t *sequence) {
     if (!UpfWorkerRegistryIsConfigured()) return -ENOENT;
     if (!update || !sequence || update->operation < UPF_STEER_PROBE ||
-        update->operation > UPF_STEER_SESSION_DEL || update->slot >= g_upf_workers->config.slot_count)
+        update->operation > UPF_STEER_N3_DEL || update->slot >= g_upf_workers->config.slot_count)
         return -EINVAL;
     uint32_t previous = __atomic_load_n(&g_upf_workers->steer_request_seq, __ATOMIC_RELAXED);
     if (previous != steer_consumed) return -EBUSY;
@@ -94,6 +94,34 @@ int UpfSteerResult(uint32_t sequence, int32_t *result) {
     if (__atomic_load_n(&g_upf_workers->steer_ack_seq, __ATOMIC_ACQUIRE) != sequence) return -EINPROGRESS;
     *result = g_upf_workers->steer_result;
     steer_consumed = sequence;
+    return 0;
+}
+
+int UpfWorkerCleanupRequest(uint16_t slot, const UpfSessionCleanup *update, uint32_t *sequence) {
+    if (!UpfWorkerRegistryIsConfigured()) return -ENOENT;
+    if (!update || !sequence || slot >= g_upf_workers->config.slot_count ||
+        update->session_index >= UPF_MAX_SESSION_RULES || !update->seid || !update->version || !update->generation)
+        return -EINVAL;
+    UpfWorkerRuntime *r = &g_upf_workers->runtime[slot];
+    if (r->state != UPF_WORKER_READY || update->generation != r->generation) return -ESTALE;
+    uint32_t previous = __atomic_load_n(&r->cleanup_request_seq, __ATOMIC_RELAXED);
+    if (previous != r->cleanup_consumed_seq ||
+        __atomic_load_n(&r->cleanup_ack_seq, __ATOMIC_ACQUIRE) != previous) return -EBUSY;
+    if (previous == UINT32_MAX) return -EOVERFLOW;
+    r->cleanup_request = *update;
+    *sequence = previous + 1;
+    __atomic_store_n(&r->cleanup_request_seq, *sequence, __ATOMIC_RELEASE);
+    return 0;
+}
+
+int UpfWorkerCleanupResult(uint16_t slot, uint32_t sequence, int32_t *result) {
+    if (!g_upf_workers) return -ENOENT;
+    if (slot >= g_upf_workers->config.slot_count || !sequence || !result) return -EINVAL;
+    UpfWorkerRuntime *r = &g_upf_workers->runtime[slot];
+    if (__atomic_load_n(&r->cleanup_request_seq, __ATOMIC_RELAXED) != sequence) return -ESTALE;
+    if (__atomic_load_n(&r->cleanup_ack_seq, __ATOMIC_ACQUIRE) != sequence) return -EINPROGRESS;
+    *result = r->cleanup_result;
+    r->cleanup_consumed_seq = sequence;
     return 0;
 }
 

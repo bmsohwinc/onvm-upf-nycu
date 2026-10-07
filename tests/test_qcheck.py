@@ -202,6 +202,28 @@ class QcheckTests(unittest.TestCase):
             log.update()
             self.assertEqual(log.workers[0]["state"], "failed")
 
+    def test_planned_stop_restart_and_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "upfc.log"
+            log = qcheck.WorkerLog(path, 2)
+            events = [
+                ("Spawned UPF-U slot=1 pid=123 service=15", "starting", None),
+                ("UPF-U slot=1 instance=8 READY", "ready", 8),
+                ("UPF-U slot=1 STOPPING sessions=0", "stopping", 8),
+                ("UPF-U slot=1 INACTIVE stop_ms=2.0", "inactive", None),
+                ("Spawned UPF-U slot=1 pid=124 service=15", "starting", None),
+                ("UPF-U slot=1 instance=9 READY", "ready", 9),
+                ("UPF-U slot=1 stop failed: error=-5", "failed", 9),
+                ("UPF-U slot 1 stop timed out; slot will not be reused", "failed", 9),
+            ]
+            for line, state, instance in events:
+                with path.open("a") as stream:
+                    stream.write(line + "\n")
+                log.update()
+                self.assertEqual(log.workers[1]["state"], state)
+                self.assertEqual(log.workers[1].get("instance"), instance)
+                self.assertEqual(log.workers[1]["service"], 15)
+
     def test_log_truncation_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "upfc.log"

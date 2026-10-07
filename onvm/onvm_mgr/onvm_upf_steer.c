@@ -82,7 +82,7 @@ static int filter(unsigned side, uint32_t location, uint16_t vf, struct in_addr 
     if (location >= capacity[side]) return -ENOSPC;
     struct ethtool_rxnfc command = {.cmd = add ? ETHTOOL_SRXCLSRLINS : ETHTOOL_SRXCLSRLDEL};
     command.fs.location = location;
-    if (add) {
+    {
         /* Queue zero in VF vf; the VF selector is one-based in ring_cookie. */
         command.fs.ring_cookie = (uint64_t)(vf + 1) << ETHTOOL_RX_FLOW_SPEC_RING_VF_OFF;
         command.fs.flow_type = side ? IP_USER_FLOW : UDP_V4_FLOW;
@@ -94,12 +94,24 @@ static int filter(unsigned side, uint32_t location, uint16_t vf, struct in_addr 
             command.fs.h_u.tcp_ip4_spec.pdst = htons(2152);
             command.fs.m_u.tcp_ip4_spec.pdst = UINT16_MAX;
         }
-        /* Do not replace a rule inserted by another administrator after probe. */
+        /* Verify ownership before removal as well as before insertion. */
         struct ethtool_rxnfc existing = {.cmd = ETHTOOL_GRXCLSRULE};
         existing.fs.location = location;
         int rc = ethctl(pf, &existing);
-        if (rc == 0) return -EEXIST;
-        if (rc != -EINVAL && rc != -ENOENT) return rc;
+        if (add) {
+            if (!rc) return -EEXIST;
+            if (rc != -EINVAL && rc != -ENOENT) return rc;
+        } else {
+            if (rc == -EINVAL || rc == -ENOENT) return 0;
+            if (rc) return rc;
+            /* ixgbe reports FLOW_EXT even when all extension fields are zero. */
+            if ((existing.fs.flow_type & ~FLOW_EXT) != command.fs.flow_type ||
+                existing.fs.ring_cookie != command.fs.ring_cookie ||
+                memcmp(&existing.fs.h_u, &command.fs.h_u, sizeof(command.fs.h_u)) ||
+                memcmp(&existing.fs.m_u, &command.fs.m_u, sizeof(command.fs.m_u)) ||
+                memcmp(&existing.fs.h_ext, &command.fs.h_ext, sizeof(command.fs.h_ext)) ||
+                memcmp(&existing.fs.m_ext, &command.fs.m_ext, sizeof(command.fs.m_ext))) return -ESTALE;
+        }
     }
     return ethctl(pf, &command);
 }
@@ -111,6 +123,15 @@ static int apply(const UpfSteerUpdate *update) {
     const UpfWorkerSlotConfig *slot = &g_upf_workers->config.slots[update->slot];
     if (update->generation != g_upf_workers->runtime[update->slot].generation) return -ESTALE;
     int rc;
+    if (update->operation == UPF_STEER_N3_DEL) {
+        for (unsigned i = 0; i < UPF_MAX_SESSION_RULES; i++)
+            if (sessions[i].generation && sessions[i].slot == update->slot) return -EBUSY;
+        if (!n3_generation[update->slot]) return 0;
+        if (n3_generation[update->slot] != update->generation) return -ESTALE;
+        rc = filter(0, update->slot, slot->n3_vf, slot->n3_addr, 0);
+        if (!rc) n3_generation[update->slot] = 0;
+        return rc;
+    }
     if (update->operation == UPF_STEER_N3_ADD) {
         if (n3_generation[update->slot])
             return n3_generation[update->slot] == update->generation ? 0 : -ESTALE;

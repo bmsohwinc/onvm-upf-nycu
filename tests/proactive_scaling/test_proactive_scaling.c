@@ -17,11 +17,19 @@ UpfWorkerRegistry *g_upf_workers = &registry;
 static pid_t children[UPF_MAX_WORKERS];
 static int starting, control_ready, control_error, spawn_calls, spawn_error;
 static uint64_t now, last_queue_sample;
+static uint32_t session_count[UPF_MAX_WORKERS], shutdown_sequence;
+static int stopping = -1, shutdown_stage, down_candidate = -1;
+static uint64_t shutdown_started, shutdown_deadline, down_since;
+#define STOP_N3 0
+#define MAX_PENDING 4
 static char trigger_log[512];
-struct Pending { uint32_t transaction_id, xact_index; };
+struct Pending { uint32_t transaction_id, xact_index; int deleting, responded; void *message; };
+static struct Pending requests[MAX_PENDING];
 
 static uint64_t rte_get_timer_cycles(void) { return now; }
 static uint64_t rte_get_timer_hz(void) { return 1000; }
+static uint64_t after_ms(uint32_t ms) { return now + ms; }
+static void state(uint16_t slot, UpfWorkerState value) { registry.runtime[slot].state = value; }
 static int onvm_nf_is_valid(const struct onvm_nf *nf) { return nf->valid; }
 static unsigned rte_ring_count(const struct rte_ring *ring) {
     assert(registry.nf_lock);
@@ -56,8 +64,12 @@ static void setup(void) {
     memset(&registry, 0, sizeof(registry));
     memset(children, 0, sizeof(children));
     memset(nfs, 0, sizeof(nfs));
+    memset(session_count, 0, sizeof(session_count));
+    memset(requests, 0, sizeof(requests));
     context.scaling = (UpfScalingConfig){.slot_count = 3, .min_workers = 1, .max_workers = 3,
-        .rx_queue_threshold = 40, .queue_sample_interval_ms = 10, .queue_window_samples = 3};
+        .rx_queue_threshold = 40, .queue_sample_interval_ms = 10, .queue_window_samples = 3,
+        .scale_down_queue_threshold = 10, .scale_down_hold_ms = 30000, .worker_stop_timeout_ms = 5000};
+    stopping = down_candidate = -1;
     starting = -1;
     control_ready = 1;
     control_error = spawn_calls = spawn_error = 0;

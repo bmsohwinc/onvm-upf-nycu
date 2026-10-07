@@ -485,6 +485,21 @@ findIndexByUeIpAddress(uint32_t ue_ip) {
     return ueHashSearch(ue_ip);
 }
 
+void removeEntrybyUeIp(uint32_t ue_ip) {
+    rte_spinlock_lock(&ue_table_lock);
+    int index = ueHashSearch(ue_ip);
+    if (index >= 0) {
+        rte_spinlock_lock(&ue_tb_locks[index]);
+        memset(&ue_table[index], 0, sizeof(ue_table[index]));
+        rte_spinlock_unlock(&ue_tb_locks[index]);
+        /* Rebuild on deletion to preserve open-addressing collision chains. */
+        ueHashInit();
+        for (int i = 0; i < MAX_UE; i++)
+            if (ue_table[i].ue_ip) ueHashInsert(ue_table[i].ue_ip, i);
+    }
+    rte_spinlock_unlock(&ue_table_lock);
+}
+
 int
 addEntrybyUeIp(uint32_t ue_ip, uint32_t ue_ambr, uint32_t ue_gbr, uint32_t ue_mbr) {
     int added_idx = -1;

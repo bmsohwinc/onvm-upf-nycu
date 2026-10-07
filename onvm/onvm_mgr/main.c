@@ -242,6 +242,7 @@ tx_thread_main(void *arg) {
 
         for (; worker_keep_running;) {
                 /* Read packets from the NF's tx queue and process them as needed */
+                rte_rwlock_read_lock(&onvm_upf_tx_lock);
                 for (i = tx_mgr->tx_thread_info->first_nf; i < tx_mgr->tx_thread_info->last_nf; i++) {
                         nf = &nfs[i];
                         if (!onvm_nf_is_valid(nf))
@@ -261,6 +262,7 @@ tx_thread_main(void *arg) {
 
                 /* Send a burst to every NF */
                 onvm_pkt_flush_all_nfs(tx_mgr, NULL);
+                rte_rwlock_read_unlock(&onvm_upf_tx_lock);
         }
 
         RTE_LOG(INFO, APP, "Socket %d, Core %d: TX thread done\n", rte_socket_id(), rte_lcore_id());

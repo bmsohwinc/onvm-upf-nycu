@@ -37,6 +37,9 @@ static const Field scaling_fields[] = {
     FIELD(UpfScalingConfig, rx_queue_threshold, FIELD_U32, 0),
     FIELD(UpfScalingConfig, queue_sample_interval_ms, FIELD_U32, 0),
     FIELD(UpfScalingConfig, queue_window_samples, FIELD_U32, 0),
+    FIELD(UpfScalingConfig, scale_down_queue_threshold, FIELD_U32, 0),
+    FIELD(UpfScalingConfig, scale_down_hold_ms, FIELD_U32, 0),
+    FIELD(UpfScalingConfig, worker_stop_timeout_ms, FIELD_U32, 0),
     FIELD(UpfScalingConfig, teid_first, FIELD_U32, 0),
     FIELD(UpfScalingConfig, teid_last, FIELD_U32, 0),
     FIELD(UpfScalingConfig, worker_binary, FIELD_STRING, 1),
@@ -138,6 +141,8 @@ int UpfScalingConfigParse(yaml_document_t *doc, yaml_node_t *mapping,
     UpfScalingConfig config = {
         .min_workers = 1, .rx_queue_threshold = 40,
         .queue_sample_interval_ms = 10, .queue_window_samples = 10,
+        .scale_down_queue_threshold = 10, .scale_down_hold_ms = 30000,
+        .worker_stop_timeout_ms = 5000,
         .teid_first = 0x1001, .teid_last = UINT32_MAX,
         .file_prefix = "rte", .startup_timeout_ms = 30000,
     };
@@ -152,6 +157,10 @@ int UpfScalingConfigParse(yaml_document_t *doc, yaml_node_t *mapping,
         return Fail(error, error_size, "Queue sample interval must be positive");
     if (!config.queue_window_samples || config.queue_window_samples > UPF_MAX_QUEUE_WINDOW_SAMPLES)
         return Fail(error, error_size, "queue_window_samples must be between 1 and %u", UPF_MAX_QUEUE_WINDOW_SAMPLES);
+    if (config.scale_down_queue_threshold >= config.rx_queue_threshold)
+        return Fail(error, error_size, "scale_down_queue_threshold must be below rx_queue_threshold");
+    if (!config.scale_down_hold_ms || !config.worker_stop_timeout_ms)
+        return Fail(error, error_size, "Scale-down hold and worker stop timeout must be positive");
     if (config.worker_binary[0] != '/')
         return Fail(error, error_size, "worker_binary must be an absolute path");
     if (config.startup_timeout_ms < 1000 || config.startup_timeout_ms > 300000)

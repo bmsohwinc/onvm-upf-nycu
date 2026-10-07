@@ -10,14 +10,17 @@
 #endif
 
 rte_spinlock_t onvm_upf_lock = RTE_SPINLOCK_INITIALIZER;
+rte_rwlock_t onvm_upf_tx_lock = RTE_RWLOCK_INITIALIZER;
 
 void onvm_upf_nf_lock(void) {
+    rte_rwlock_write_lock(&onvm_upf_tx_lock);
     rte_spinlock_lock(&onvm_upf_lock);
     while (!UpfWorkerNfTryLock()) rte_pause();
 }
 void onvm_upf_nf_unlock(void) {
     UpfWorkerNfUnlock();
     rte_spinlock_unlock(&onvm_upf_lock);
+    rte_rwlock_write_unlock(&onvm_upf_tx_lock);
 }
 
 static int dynamic_mode;
@@ -54,6 +57,18 @@ static int install_config(void) {
     return 1;
 }
 
+/* A reused VF may still contain packets from its previous worker. Bounded
+ * cleanup runs on its sole RX thread, before publishing the new route. */
+static int discard_rx(uint16_t port) {
+    struct rte_mbuf *packets[PACKET_READ_SIZE];
+    for (unsigned burst = 0; burst < 128; burst++) {
+        uint16_t count = rte_eth_rx_burst(port, 0, packets, PACKET_READ_SIZE);
+        for (uint16_t i = 0; i < count; i++) rte_pktmbuf_free(packets[i]);
+        if (!count) return 0;
+    }
+    return -EBUSY;
+}
+
 static int apply_update(const UpfWorkerPollUpdate *update) {
     if (update->slot >= g_upf_workers->config.slot_count || !update->generation ||
         !update->instance_id || update->instance_id >= MAX_NFS || update->enable > 1)
@@ -67,7 +82,8 @@ static int apply_update(const UpfWorkerPollUpdate *update) {
         routes[slot].active = 0;
         return 0;
     }
-    if (__atomic_load_n(&g_upf_workers->runtime[slot].state, __ATOMIC_ACQUIRE) == UPF_WORKER_FAILED)
+    uint32_t state = __atomic_load_n(&g_upf_workers->runtime[slot].state, __ATOMIC_ACQUIRE);
+    if (state == UPF_WORKER_FAILED || state == UPF_WORKER_STOPPING)
         return -ECANCELED;
     if (routes[slot].active && !same_start)
         return -EBUSY;
@@ -83,6 +99,8 @@ static int apply_update(const UpfWorkerPollUpdate *update) {
         services[s->service_id][0] != update->instance_id)
         return -EINVAL;
 
+    if (!routes[slot].active && routes[slot].generation &&
+        (discard_rx(s->n3_port) || discard_rx(s->n6_port))) return -EBUSY;
     routes[slot].generation = update->generation;
     routes[slot].instance_id = update->instance_id;
     routes[slot].active = 1;

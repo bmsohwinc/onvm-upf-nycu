@@ -6,6 +6,7 @@
 #include "../../../onvm/onvm_nflib/onvm_pkt_common.c"
 #include "../../../onvm/onvm_mgr/onvm_pkt.c"
 #include "rx_loop.inc"
+#include "tx_loop.inc"
 
 static UpfWorkerRegistry registry;
 static struct rte_ring rx[MAX_NFS], tx[MAX_NFS];
@@ -176,7 +177,14 @@ int main(int argc, char **argv) {
     update(0, 7, 1, 0, 0); /* Duplicate disable is idempotent. */
     update(0, 7, 1, 1, -ESTALE);
     assert(onvm_upf_port_destination(1) == 8 && onvm_upf_port_destination(3) == 8);
+    registry.runtime[0].state = UPF_WORKER_STOPPING;
+    update(0, 7, 2, 1, -ECANCELED);
+    registry.runtime[0].state = UPF_WORKER_STARTING;
+    struct rte_mbuf stale_n3 = {.port = 0}, stale_n6 = {.port = 2};
+    next_rx[0] = &stale_n3; next_rx[2] = &stale_n6;
+    unsigned previous_rx = rx[7].count;
     update(0, 7, 2, 1, 0);
+    assert(stale_n3.freed && stale_n6.freed && rx[7].count == previous_rx);
     /* Manager STOP invalidates the mapping, even if the instance ID is reused. */
     rte_spinlock_lock(&onvm_upf_lock); onvm_upf_forget_nf(7); rte_spinlock_unlock(&onvm_upf_lock);
     rx_pass(); assert(!nic_calls[0] && !nic_calls[2] && nic_calls[1] && nic_calls[3]);
@@ -188,8 +196,14 @@ int main(int argc, char **argv) {
     struct rte_mbuf output = {.meta = {.action = ONVM_NF_ACTION_OUT, .destination = 0}};
     struct rte_mbuf *outputs[] = {&output};
     struct tx_info txinfo = {0}; struct queue_mgr tx_manager = {.mgr_type_t = MGR, .tx_thread_info = &txinfo};
-    onvm_pkt_process_tx_batch(&tx_manager, outputs, 0, 1, &nfs[7]);
-    onvm_pkt_flush_all_ports(&tx_manager); assert(tx_calls == 1 && !output.freed);
+    assert(rte_ring_enqueue_bulk(&tx[7], (void **)outputs, 1, NULL) == 1);
+    txinfo.first_nf = 7; txinfo.last_nf = 8;
+    worker_keep_running = 1;
+    assert(tx_thread_main(&tx_manager) == 0);
+    assert(tx_calls == 1 && !output.freed && !tx[7].count);
+    onvm_upf_nf_lock();
+    assert(registry.nf_lock && pthread_rwlock_tryrdlock(&onvm_upf_tx_lock) != 0);
+    onvm_upf_nf_unlock();
 
     concurrent_updates();
     int32_t status;

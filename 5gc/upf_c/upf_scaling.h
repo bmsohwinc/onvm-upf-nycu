@@ -6,6 +6,8 @@
 int UpfScalingInit(void);
 /* Takes ownership of the parsed message buffer only on success. */
 int UpfScalingEnqueue(Bufblk *message, PfcpXact *xact);
+struct _UpfSession;
+int UpfScalingDelete(Bufblk *message, PfcpXact *xact, struct _UpfSession *session);
 int UpfControlLoop(struct onvm_nf_local_ctx *ctx);
 void UpfScalingStop(void);
 #endif

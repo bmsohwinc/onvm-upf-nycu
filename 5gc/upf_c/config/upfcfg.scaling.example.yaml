@@ -1,4 +1,4 @@
-# Dynamic scale-out for new IPv4 sessions. Manager initializes all VFs first.
+# Dynamic scaling for IPv4 sessions. Manager initializes all VFs first.
 # Manually route the UE subnet on DN via CN's kernel-owned N6 PF IP.
 info:
   version: 1.0.0
@@ -18,6 +18,9 @@ configuration:
     rx_queue_threshold: 40     # Every READY worker's average RX backlog must exceed this.
     queue_sample_interval_ms: 10
     queue_window_samples: 10   # Sliding window per worker; 1..1024 samples (~100 ms here).
+    scale_down_queue_threshold: 10 # All READY averages must be <= this; below scale-up threshold.
+    scale_down_hold_ms: 30000  # Continuous eligibility before stopping a session-free worker.
+    worker_stop_timeout_ms: 5000 # Cleanup/exit deadline; failure prevents slot reuse.
     worker_binary: /absolute/path/to/onvm-upf/build/5gc/l25gc_upf_u
     file_prefix: rte          # Must match manager and UPF-C EAL --file-prefix.
     startup_timeout_ms: 30000 # Registration/classifier startup, not a cooldown.

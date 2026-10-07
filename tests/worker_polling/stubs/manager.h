@@ -11,6 +11,8 @@
 #include <string.h>
 #include <rte_eal.h>
 #include <rte_memzone.h>
+#include <rte_rwlock.h>
+extern rte_rwlock_t onvm_upf_tx_lock;
 
 #define RTE_MAX_ETHPORTS 32
 #define MAX_NFS 128
@@ -32,7 +34,7 @@ struct onvm_pkt_meta { uint8_t action; uint16_t destination, src; uint8_t chain_
 struct rte_mbuf { uint16_t port; struct onvm_pkt_meta meta; unsigned freed; };
 struct rte_ring { void *pkts[128]; unsigned count, capacity; };
 struct packet_buf { struct rte_mbuf *buffer[PACKET_READ_SIZE]; uint16_t count; };
-struct tx_info { struct packet_buf port_tx_bufs[RTE_MAX_ETHPORTS]; };
+struct tx_info { struct packet_buf port_tx_bufs[RTE_MAX_ETHPORTS]; unsigned first_nf, last_nf; };
 struct queue_mgr { int mgr_type_t, id; struct packet_buf nf_rx_bufs[MAX_NFS], *to_tx_buf; struct tx_info *tx_thread_info; };
 struct onvm_nf {
     uint16_t instance_id, service_id;
@@ -70,6 +72,16 @@ static unsigned rte_ring_enqueue_bulk(struct rte_ring *ring, void **pkts, unsign
     (void)unused;
     if (ring->count + count > ring->capacity) return 0;
     memcpy(ring->pkts + ring->count, pkts, count * sizeof(*pkts)); ring->count += count; return count;
+}
+static unsigned rte_ring_dequeue_burst(struct rte_ring *ring, void **pkts, unsigned count, void *unused) {
+    (void)unused;
+    assert(pthread_rwlock_trywrlock(&onvm_upf_tx_lock) != 0); /* NF removal cannot overlap TX. */
+    if (count > ring->count) count = ring->count;
+    memcpy(pkts, ring->pkts, count * sizeof(*pkts));
+    memmove(ring->pkts, ring->pkts + count, (ring->count - count) * sizeof(*pkts));
+    ring->count -= count;
+    worker_keep_running = 0; /* One TX pass. */
+    return count;
 }
 static int onvm_nf_is_valid(struct onvm_nf *nf) { return nf->valid; }
 static uint16_t onvm_sc_service_to_nf_map(uint16_t service, struct rte_mbuf *pkt) {

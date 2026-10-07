@@ -725,39 +725,40 @@ upf_u_shaper_drain(struct onvm_nf *nf) {
     return total;
 }
 
+void upf_u_shaper_forget_ue(int ue_idx) {
+    if (ue_idx < 0 || ue_idx >= MAX_UE) return;
+    struct ue_shaper *ue = &g_ue_shaper[ue_idx];
+    rte_spinlock_lock(&ue->lock);
+    for (int flow_idx = 0; flow_idx < SHAPER_MAX_FLOWS_PER_UE; flow_idx++) {
+        struct shaper_flow *flow = &ue->flows[flow_idx];
+        struct shaper_entry *entry = flow->head;
+        while (entry != NULL) {
+            struct shaper_entry *next = entry->next;
+            if (entry->pkt != NULL) rte_pktmbuf_free(entry->pkt);
+            shaper_free_entry(entry);
+            entry = next;
+        }
+        memset(flow, 0, sizeof(*flow));
+    }
+    ue->queued_pkts = 0;
+    ue->next_excess_is_yellow = 1;
+    for (int list_id = 0; list_id < SHAPER_ACTIVE_COUNT; list_id++) {
+        TAILQ_INIT(&ue->active[list_id]);
+        ue->active_count[list_id] = 0;
+    }
+    rte_spinlock_unlock(&ue->lock);
+    shaper_clear_ue_active(ue_idx);
+}
+
 void
 upf_u_shaper_cleanup(void) {
-    for (int ue_idx = 0; ue_idx < MAX_UE; ue_idx++) {
-        struct ue_shaper *ue = &g_ue_shaper[ue_idx];
-
-        rte_spinlock_lock(&ue->lock);
-        for (int flow_idx = 0;
-             flow_idx < SHAPER_MAX_FLOWS_PER_UE;
-             flow_idx++) {
-            struct shaper_flow *flow = &ue->flows[flow_idx];
-            struct shaper_entry *entry = flow->head;
-
-            while (entry != NULL) {
-                struct shaper_entry *next = entry->next;
-                if (entry->pkt != NULL)
-                    rte_pktmbuf_free(entry->pkt);
-                shaper_free_entry(entry);
-                entry = next;
-            }
-            memset(flow, 0, sizeof(*flow));
-        }
-        ue->queued_pkts = 0;
-        ue->next_excess_is_yellow = 1;
-        for (int list_id = 0; list_id < SHAPER_ACTIVE_COUNT; list_id++) {
-            TAILQ_INIT(&ue->active[list_id]);
-            ue->active_count[list_id] = 0;
-        }
-        rte_spinlock_unlock(&ue->lock);
-    }
+    for (int ue_idx = 0; ue_idx < MAX_UE; ue_idx++) upf_u_shaper_forget_ue(ue_idx);
     for (uint32_t word_idx = 0; word_idx < SHAPER_UE_BITMAP_WORDS; word_idx++)
         __atomic_store_n(&g_shaper_active_ue_bitmap[word_idx], 0,
                          __ATOMIC_RELEASE);
     g_shaper_active_ue_cursor = 0;
+    if (g_shaper_entry_pool) rte_mempool_free(g_shaper_entry_pool);
+    g_shaper_entry_pool = NULL;
 }
 
 bool

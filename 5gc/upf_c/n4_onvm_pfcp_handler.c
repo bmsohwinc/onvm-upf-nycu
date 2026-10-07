@@ -1449,8 +1449,8 @@ Status UpfN4HandleUpdateFar(UpfSession *session, UpdateFAR *updateFar) {
     if ((oldAction & PFCP_FAR_APPLY_ACTION_BUFF) &&
         (upfFar->applyAction & PFCP_FAR_APPLY_ACTION_FORW)) {
          uint16_t owner = session->worker.service_id ? session->worker.service_id : UPF_U_SERVICE_ID;
-         UpfSendEvt1(owner, UPF_EVENT_CLEAR_AND_DRAIN,
-                     (uintptr_t)session->index);
+         UpfSendEvt2(owner, UPF_EVENT_CLEAR_AND_DRAIN,
+                     (uintptr_t)session->index, (uintptr_t)session->upfSeid);
     }
 
 #if HANDLE_BUFFER
@@ -1789,6 +1789,11 @@ Status UpfN4HandleSessionModificationRequest(UpfSession *session, PfcpXact *xact
     Status status;
     PfcpHeader header;
     Bufblk *bufBlk;
+    uint8_t cause = PFCP_CAUSE_REQUEST_ACCEPTED;
+    if (__atomic_load_n(&session->deletion_pending, __ATOMIC_ACQUIRE)) {
+        cause = PFCP_CAUSE_REQUEST_REJECTED;
+        goto respond;
+    }
 
     /* Create FAR */
     for (int i = 0; i < 2; i++) {
@@ -1883,13 +1888,14 @@ Status UpfN4HandleSessionModificationRequest(UpfSession *session, PfcpXact *xact
                     "Modification: Remove PDR error");
     }
 
+respond:
     /* Send Session Modification Response */
     memset(&header, 0, sizeof(PfcpHeader));
     header.type = PFCP_SESSION_MODIFICATION_RESPONSE;
     header.seid = session->smfSeid;
 
     status = UpfN4BuildSessionModificationResponse(&bufBlk, header.type,
-                                                   session, request);
+                                                   session, request, cause);
     UTLT_Assert(status == STATUS_OK, return STATUS_ERROR,
                 "N4 build error");
 
@@ -1903,6 +1909,17 @@ Status UpfN4HandleSessionModificationRequest(UpfSession *session, PfcpXact *xact
 
     UTLT_Info("[PFCP] Session Modification Response");
     return STATUS_OK;
+}
+
+Status UpfN4SendDeletionResponse(uint64_t smf_seid, PfcpXact *xact, uint8_t cause) {
+    PfcpHeader header = {.type = PFCP_SESSION_DELETION_RESPONSE, .seid = smf_seid};
+    Bufblk *response = NULL;
+    if (UpfN4BuildSessionDeletionResponse(&response, smf_seid, cause) != STATUS_OK) return STATUS_ERROR;
+    if (PfcpXactUpdateTx(xact, &header, response) != STATUS_OK) {
+        BufblkFree(response);
+        return STATUS_ERROR;
+    }
+    return PfcpXactCommit(xact);
 }
 
 Status UpfN4HandleSessionDeletionRequest(UpfSession *session, PfcpXact *xact,
@@ -1920,8 +1937,8 @@ Status UpfN4HandleSessionDeletionRequest(UpfSession *session, PfcpXact *xact,
     header.type = PFCP_SESSION_DELETION_RESPONSE;
     header.seid = session->smfSeid;
 
-    status = UpfN4BuildSessionDeletionResponse(&bufBlk, header.type,
-                                               session, request);
+    (void)request;
+    status = UpfN4BuildSessionDeletionResponse(&bufBlk, session->smfSeid, PFCP_CAUSE_REQUEST_ACCEPTED);
     UTLT_Assert(status == STATUS_OK, return STATUS_ERROR, "N4 build error");
 
     if (!Self()->scaling.slot_count) {

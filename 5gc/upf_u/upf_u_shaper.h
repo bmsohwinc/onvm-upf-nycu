@@ -57,6 +57,8 @@ upf_u_shaper_init(struct onvm_nf *nf);
 void
 upf_u_shaper_cleanup(void);
 
+void upf_u_shaper_forget_ue(int ue_idx);
+
 bool
 upf_u_shaper_build_dl_flow_key(struct rte_mbuf *pkt, const UPDK_PDR *pdr,
                                uint32_t ue_ip, bool is_qos,

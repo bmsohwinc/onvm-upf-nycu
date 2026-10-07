@@ -101,18 +101,16 @@ Status UpfN4BuildSessionEstablishmentResponse(Bufblk **bufBlk, uint8_t type,
 
 Status UpfN4BuildSessionModificationResponse(Bufblk **bufBlkPtr, uint8_t type,
                                              UpfSession *session,
-                                             PFCPSessionModificationRequest *modifyRequest) {
+                                             PFCPSessionModificationRequest *modifyRequest, uint8_t cause) {
     Status status;
     PfcpMessage pfcpMessage;
     PFCPSessionModificationResponse *response = NULL;
-    uint8_t cause;
 
     response = &pfcpMessage.pFCPSessionModificationResponse;
     memset(&pfcpMessage, 0, sizeof(pfcpMessage));
 
     /* cause */
     response->cause.presence = 1;
-    cause = PFCP_CAUSE_REQUEST_ACCEPTED;
     response->cause.value = &cause;
     response->cause.len = 1;
 
@@ -128,27 +126,24 @@ Status UpfN4BuildSessionModificationResponse(Bufblk **bufBlkPtr, uint8_t type,
     return STATUS_OK;
 }
 
-Status UpfN4BuildSessionDeletionResponse(Bufblk **bufBlkPtr, uint8_t type,
-                                         UpfSession *session,
-                                         PFCPSessionDeletionRequest *deletionRequest) {
+Status UpfN4BuildSessionDeletionResponse(Bufblk **bufBlkPtr, uint64_t smf_seid, uint8_t cause) {
     Status status;
     PfcpMessage pfcpMessage;
     PFCPSessionDeletionResponse *response = NULL;
-    uint8_t cause;
 
     response = &pfcpMessage.pFCPSessionDeletionResponse;
     memset(&pfcpMessage, 0, sizeof(PfcpMessage));
 
     /* cause */
     response->cause.presence = 1;
-    /* Dynamic teardown needs NIC filter withdrawal and is outside this phase. */
-    cause = Self()->scaling.slot_count ? PFCP_CAUSE_REQUEST_REJECTED : PFCP_CAUSE_REQUEST_ACCEPTED;
     response->cause.value = &cause;
     response->cause.len = 1;
 
     /* TODO: Set Offending IE, Load Control Information, Overload Control Information, Usage Report */
 
-    pfcpMessage.header.type = type;
+    pfcpMessage.header.type = PFCP_SESSION_DELETION_RESPONSE;
+    pfcpMessage.header.seidP = 1;
+    pfcpMessage.header.seid = smf_seid;
     status = PfcpBuildMessage(bufBlkPtr, &pfcpMessage);
     UTLT_Assert(status == STATUS_OK, return STATUS_ERROR, "PFCP build error");
 

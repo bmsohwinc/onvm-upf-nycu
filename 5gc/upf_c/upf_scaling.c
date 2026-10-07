@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0
- * One UPF-C event loop owns admission, child processes and pending requests.
- * Periodic queue samples drive scale-out; arrivals only select READY workers.
+ * One UPF-C event loop owns session and worker lifecycles.
+ * Queue averages drive scaling; arrivals only select READY workers.
  */
 #include <errno.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -31,18 +32,24 @@ static int starting = -1, startup_stage, control_ready, control_error;
 static uint32_t startup_sequence, probe_sequence;
 static uint64_t startup_deadline, startup_started, next_teid;
 static uint64_t last_queue_sample;
+static uint32_t session_count[UPF_MAX_WORKERS];
+enum { STOP_N3, STOP_WAIT_N3, STOP_POLL, STOP_WAIT_POLL, STOP_DRAIN, STOP_EXIT };
+static int stopping = -1, shutdown_stage, down_candidate = -1;
+static uint32_t shutdown_sequence;
+static uint64_t shutdown_deadline, shutdown_started, down_since;
 
 enum { WAIT_SLOT, INSTALL_STEERING, WAIT_STEERING, WAIT_CLASSIFIER,
-       ROLLBACK_STEERING, WAIT_ROLLBACK, RETIRE_RULES, WAIT_RETIREMENT, QUARANTINED };
+       ROLLBACK_STEERING, WAIT_ROLLBACK, RETIRE_RULES, WAIT_RETIREMENT,
+       WAIT_SESSION_CLEANUP, DELETE_RESPONSE, QUARANTINED };
 static struct Pending {
     Bufblk *message;
     PfcpXact *xact;
     uint32_t xact_index, transaction_id;
     PfcpNode *peer;
     UpfSession *session;
-    int slot, stage, responded;
-    uint32_t sequence, version;
-    uint64_t deadline, admission_started, attach_started;
+    int slot, stage, responded, deleting;
+    uint32_t sequence, version, cleanup_sequence;
+    uint64_t deadline, admission_started, attach_started, smf_seid;
 } requests[MAX_PENDING];
 
 static double elapsed_ms(uint64_t start, uint64_t end) {
@@ -65,6 +72,7 @@ static int live_count(void) {
 }
 
 static int start_worker(void) {
+    if (stopping >= 0) return -EAGAIN;
     if (starting >= 0) return starting;
     if (live_count() >= Self()->scaling.max_workers) return -ENOSPC;
     int slot = -1;
@@ -79,6 +87,8 @@ static int start_worker(void) {
     if (busy) { state(slot, UPF_WORKER_FAILED); return -EBUSY; }
 
     UpfWorkerRuntime *r = &g_upf_workers->runtime[slot];
+    if (r->generation == UINT32_MAX) { state(slot, UPF_WORKER_FAILED); return -EOVERFLOW; }
+    r->instance_id = r->registered_instance = r->ack_version = r->ack_generation = 0;
     r->generation++;
     __atomic_store_n(&r->reader_generation, r->generation, __ATOMIC_RELEASE);
     state(slot, UPF_WORKER_STARTING); /* Register reader before it can see a snapshot. */
@@ -150,10 +160,45 @@ static struct QueueWindow {
 } queue_windows[UPF_MAX_WORKERS];
 static uint32_t queue_samples, queue_next, queue_ready_mask;
 
+static void cancel_downscale(void) {
+    if (down_candidate >= 0) UTLT_Info("Scale-down hold cancelled: slot=%d", down_candidate);
+    down_candidate = -1;
+    down_since = 0;
+}
+
 static void reset_queue_windows(void) {
+    cancel_downscale();
     queue_samples = queue_next = queue_ready_mask = 0;
     /* Sums are cleared on the first sample; old values are overwritten before
      * they can be subtracted. No need to clear the whole history buffer. */
+}
+
+static void sample_downscale(int ready, uint64_t max_sum, uint64_t now) {
+    const UpfScalingConfig *c = &Self()->scaling;
+    int candidate = -1;
+    if (ready > c->min_workers && max_sum <= (uint64_t)c->scale_down_queue_threshold * c->queue_window_samples) {
+        for (int i = c->slot_count - 1; i >= 0; i--)
+            if (g_upf_workers->runtime[i].state == UPF_WORKER_READY && !session_count[i]) { candidate = i; break; }
+        for (unsigned i = 0; i < MAX_PENDING; i++)
+            if (requests[i].message && !requests[i].deleting && !requests[i].responded) candidate = -1;
+    }
+    if (candidate != down_candidate) {
+        cancel_downscale();
+        down_candidate = candidate;
+        down_since = now;
+        if (candidate >= 0) UTLT_Info("Scale-down hold started: slot=%d hold_ms=%u", candidate, c->scale_down_hold_ms);
+    }
+    if (candidate < 0 || now - down_since < (uint64_t)c->scale_down_hold_ms * rte_get_timer_hz() / 1000) return;
+    stopping = candidate;
+    shutdown_stage = STOP_N3;
+    shutdown_sequence = 0;
+    shutdown_started = now;
+    shutdown_deadline = after_ms(c->worker_stop_timeout_ms);
+    state(stopping, UPF_WORKER_STOPPING);
+    down_candidate = -1;
+    reset_queue_windows();
+    UTLT_Info("UPF-U slot=%d STOPPING sessions=0 max_rx_avg=%.3f hold_ms=%u",
+              stopping, (double)max_sum / c->queue_window_samples, c->scale_down_hold_ms);
 }
 
 static void sample_load(void) {
@@ -163,7 +208,7 @@ static void sample_load(void) {
     uint64_t elapsed = now - last_queue_sample;
     if (elapsed < interval) return;
     last_queue_sample = now;
-    if (!control_ready || control_error || starting >= 0) {
+    if (!control_ready || control_error || starting >= 0 || stopping >= 0) {
         reset_queue_windows();
         return;
     }
@@ -188,7 +233,7 @@ static void sample_load(void) {
     if (changed || ready_mask != queue_ready_mask) reset_queue_windows();
     queue_ready_mask = ready_mask;
 
-    uint64_t min_sum = UINT64_MAX;
+    uint64_t min_sum = UINT64_MAX, max_sum = 0;
     for (int i = 0; i < count; i++) {
         const struct QueueSample *s = &samples[i];
         struct QueueWindow *w = &queue_windows[s->slot];
@@ -201,12 +246,16 @@ static void sample_load(void) {
         w->values[queue_next] = s->count;
         w->sum += s->count;
         if (w->sum < min_sum) min_sum = w->sum;
+        if (w->sum > max_sum) max_sum = w->sum;
     }
     queue_next = (queue_next + 1) % c->queue_window_samples;
     if (queue_samples < c->queue_window_samples) queue_samples++;
-    if (queue_samples < c->queue_window_samples || live_count() >= c->max_workers) return;
+    if (queue_samples < c->queue_window_samples) return;
     /* Compare sums to preserve fractional averages at the strict threshold. */
-    if (min_sum <= (uint64_t)c->rx_queue_threshold * c->queue_window_samples) return;
+    if (live_count() >= c->max_workers || min_sum <= (uint64_t)c->rx_queue_threshold * c->queue_window_samples) {
+        sample_downscale(count, max_sum, now);
+        return;
+    }
     UTLT_Info("Scale-out trigger: ready=%d min_rx_avg=%.3f threshold=%u window_samples=%u interval_ms=%u",
               count, (double)min_sum / c->queue_window_samples, c->rx_queue_threshold,
               c->queue_window_samples, c->queue_sample_interval_ms);
@@ -246,17 +295,88 @@ static void reap_workers(void) {
         pid_t rc = waitpid(children[i], &status, WNOHANG);
         if (!rc) {
             if (stop_deadline[i] && rte_get_timer_cycles() > stop_deadline[i]) {
+                state(i, UPF_WORKER_FAILED);
+                UTLT_Error("UPF-U slot %u stop timed out; slot will not be reused", i);
                 kill(-children[i], SIGKILL); stop_deadline[i] = 0;
             }
             continue;
         }
         if (rc < 0 && errno == EINTR) continue;
         if (rc < 0 && errno != ECHILD) continue;
-        UTLT_Warning("UPF-U slot %u exited; existing sessions are not reassigned", i);
+        int planned = i == stopping && shutdown_stage == STOP_EXIT &&
+            g_upf_workers->runtime[i].state == UPF_WORKER_STOPPING && rc > 0 &&
+            WIFEXITED(status) && !WEXITSTATUS(status);
+        if (!planned) {
+            UTLT_Warning("UPF-U slot %u exited; existing sessions are not reassigned", i);
+            state(i, UPF_WORKER_FAILED);
+        }
         children[i] = 0;
-        state(i, UPF_WORKER_FAILED);
+        stop_deadline[i] = 0;
         /* Only a confirmed process exit removes a reader from reclamation. */
         __atomic_store_n(&g_upf_workers->runtime[i].reader_generation, 0, __ATOMIC_RELEASE);
+    }
+}
+
+static void fail_stop(int error) {
+    UTLT_Error("UPF-U slot=%d stop failed: error=%d; slot retained FAILED", stopping, error);
+    state(stopping, UPF_WORKER_FAILED);
+    if (children[stopping] > 0) {
+        kill(-children[stopping], SIGTERM);
+        stop_deadline[stopping] = after_ms(2000);
+    }
+}
+
+static void advance_stop(void) {
+    if (stopping < 0) return;
+    UpfWorkerRuntime *r = &g_upf_workers->runtime[stopping];
+    const UpfWorkerSlotConfig *s = &Self()->scaling.slots[stopping];
+    if (r->state != UPF_WORKER_FAILED && rte_get_timer_cycles() > shutdown_deadline) fail_stop(-ETIMEDOUT);
+    int rc;
+    int32_t result;
+    /* Even after timeout, consume submitted operations before reusing a mailbox. */
+    if (shutdown_sequence) {
+        rc = shutdown_stage == STOP_WAIT_N3 ? UpfSteerResult(shutdown_sequence, &result) :
+                                             UpfWorkerPollResult(shutdown_sequence, &result);
+        if (rc == -EINPROGRESS) return;
+        shutdown_sequence = 0;
+        if (r->state != UPF_WORKER_FAILED && (rc < 0 || result < 0)) fail_stop(rc < 0 ? rc : result);
+        shutdown_stage++;
+    }
+    if (r->state == UPF_WORKER_FAILED) {
+        if (!children[stopping]) { stopping = -1; reset_queue_windows(); }
+        return;
+    }
+    if (shutdown_stage == STOP_N3) {
+        UpfSteerUpdate update = {.operation = UPF_STEER_N3_DEL, .slot = stopping, .generation = r->generation};
+        rc = UpfSteerRequest(&update, &shutdown_sequence);
+        if (!rc) shutdown_stage = STOP_WAIT_N3;
+        else if (rc != -EBUSY) fail_stop(rc);
+    } else if (shutdown_stage == STOP_POLL) {
+        UpfWorkerPollUpdate update = {.slot = stopping, .instance_id = r->instance_id, .generation = r->generation};
+        rc = UpfWorkerPollRequest(&update, &shutdown_sequence);
+        if (!rc) shutdown_stage = STOP_WAIT_POLL;
+        else if (rc != -EBUSY && rc != -EAGAIN) fail_stop(rc);
+    } else if (shutdown_stage == STOP_DRAIN) {
+        if (!UpfWorkerNfTryLock()) return;
+        struct onvm_nf *nf = &nfs[r->instance_id];
+        int drained = onvm_nf_is_valid(nf) && nf->service_id == s->service_id && nf->rx_q && nf->tx_q &&
+            !rte_ring_count(nf->rx_q) && !rte_ring_count(nf->tx_q);
+        UpfWorkerNfUnlock();
+        if (!drained) return;
+        shutdown_stage = STOP_EXIT;
+        if (kill(-children[stopping], SIGTERM) < 0) { fail_stop(-errno); return; }
+        stop_deadline[stopping] = shutdown_deadline;
+    } else if (shutdown_stage == STOP_EXIT && !children[stopping]) {
+        if (!UpfWorkerNfTryLock()) return;
+        int busy = service_counts[s->service_id] || manager_cores[s->core].nf_count || manager_cores[s->core].is_dedicated_core;
+        UpfWorkerNfUnlock();
+        if (busy) return;
+        r->instance_id = r->registered_instance = r->ack_version = r->ack_generation = 0;
+        state(stopping, UPF_WORKER_INACTIVE);
+        UTLT_Info("UPF-U slot=%d INACTIVE stop_ms=%.3f", stopping,
+                  elapsed_ms(shutdown_started, rte_get_timer_cycles()));
+        stopping = -1;
+        reset_queue_windows();
     }
 }
 
@@ -338,16 +458,21 @@ static void release_request(struct Pending *p) {
 
 static void reject(struct Pending *p, uint8_t cause) {
     if (!p->responded) {
-        UTLT_Warning("Admission failed: xid=%u xact=%u slot=%d cause=%u elapsed_ms=%.3f",
-                     p->transaction_id, p->xact_index, p->slot, cause,
+        UTLT_Warning("%s failed: xid=%u xact=%u slot=%d cause=%u elapsed_ms=%.3f",
+                     p->deleting ? "Deletion" : "Admission", p->transaction_id, p->xact_index, p->slot, cause,
                      elapsed_ms(p->admission_started, rte_get_timer_cycles()));
         PfcpXact *x = transaction(p);
         if (x) {
-            UpfRejectSessionEstablishment(p->message->buf, x, cause);
+            if (p->deleting) UpfN4SendDeletionResponse(p->smf_seid, x, cause);
+            else UpfRejectSessionEstablishment(p->message->buf, x, cause);
             x->applicationPending = 0;
             if (x->timerHolding) TimerStart(x->timerHolding);
         }
         p->responded = 1;
+    }
+    if (p->deleting) {
+        if (!p->sequence && !p->cleanup_sequence) p->stage = QUARANTINED;
+        return;
     }
     if (!p->session) release_request(p);
     else if (p->stage < ROLLBACK_STEERING) {
@@ -364,8 +489,30 @@ static int request_steering(struct Pending *p, int operation) {
     return UpfSteerRequest(&update, &p->sequence);
 }
 
+static void free_retired_session(struct Pending *p) {
+    uint64_t seid = p->session->upfSeid;
+    UpfN4FreePendingSession(p->session);
+    p->session = NULL;
+    session_count[p->slot]--;
+    if (p->deleting) {
+        UTLT_Info("Deleted SEID=%" PRIu64 " slot=%d sessions=%u", seid, p->slot, session_count[p->slot]);
+        p->stage = DELETE_RESPONSE;
+    } else release_request(p);
+}
+
 static void advance_request(struct Pending *p) {
     if (p->stage == QUARANTINED) return;
+    if (p->stage == DELETE_RESPONSE) {
+        PfcpXact *x = transaction(p);
+        if (x) {
+            int rc = UpfN4SendDeletionResponse(p->smf_seid, x, PFCP_CAUSE_REQUEST_ACCEPTED);
+            if (rc != STATUS_OK && x->step < 2) return; /* Retry building/caching, never free twice. */
+            x->applicationPending = 0;
+            if (x->timerHolding) TimerStart(x->timerHolding);
+        }
+        release_request(p);
+        return;
+    }
     if (!p->responded && (!transaction(p) || rte_get_timer_cycles() > p->deadline ||
         (p->slot >= 0 && g_upf_workers->runtime[p->slot].state == UPF_WORKER_FAILED))) {
         reject(p, PFCP_CAUSE_NO_RESOURCES_AVAILABLE);
@@ -388,6 +535,7 @@ static void advance_request(struct Pending *p) {
         uint8_t cause;
         p->session = UpfSessionAddByMessageForWorker(message, &cause, &selected);
         if (!p->session) { reject(p, cause); return; }
+        session_count[p->slot]++;
         p->session->pfcpNode = p->peer;
         cause = UpfN4InstallSessionRules(p->session, &message->pFCPSessionEstablishmentRequest);
         p->version = __atomic_load_n(&g_upf_cls_ctrl->version, __ATOMIC_ACQUIRE);
@@ -425,7 +573,7 @@ static void advance_request(struct Pending *p) {
         }
         x->applicationPending = 0;
         if (x->timerHolding) TimerStart(x->timerHolding);
-        UTLT_Info("Admitted SEID=%lu slot=%d TEID=%u xid=%u xact=%u worker_wait_ms=%.3f attach_ms=%.3f response_ms=%.3f admission_ms=%.3f response_rc=%d",
+        UTLT_Info("Admitted SEID=%" PRIu64 " slot=%d TEID=%u xid=%u xact=%u worker_wait_ms=%.3f attach_ms=%.3f response_ms=%.3f admission_ms=%.3f response_rc=%d",
                   p->session->upfSeid, p->slot, p->session->teid, p->transaction_id, p->xact_index,
                   elapsed_ms(p->admission_started, p->attach_started),
                   elapsed_ms(p->attach_started, attached),
@@ -443,21 +591,34 @@ static void advance_request(struct Pending *p) {
         rc = UpfSteerResult(p->sequence, &result);
         if (rc == -EINPROGRESS) break;
         p->sequence = 0;
-        p->stage = rc < 0 || result < 0 ? QUARANTINED : RETIRE_RULES;
+        p->stage = rc < 0 || result < 0 || (p->deleting && p->responded) ? QUARANTINED : RETIRE_RULES;
         break;
     case RETIRE_RULES:
         p->stage = UpfN4AbortPendingSession(p->session, &p->version) < 0 ? QUARANTINED : WAIT_RETIREMENT;
         break;
     case WAIT_RETIREMENT:
         if (UpfClsSafeVersion() >= p->version) {
-            UpfN4FreePendingSession(p->session);
-            release_request(p);
+            if (!p->deleting) { free_retired_session(p); break; }
+            UpfSessionCleanup update = {.seid = p->session->upfSeid, .session_index = p->session->index,
+                .generation = g_upf_workers->runtime[p->slot].generation, .version = p->version};
+            rc = UpfWorkerCleanupRequest(p->slot, &update, &p->cleanup_sequence);
+            if (!rc) p->stage = WAIT_SESSION_CLEANUP;
+            else if (rc != -EBUSY) p->stage = QUARANTINED;
         }
         break;
+    case WAIT_SESSION_CLEANUP:
+        rc = UpfWorkerCleanupResult(p->slot, p->cleanup_sequence, &result);
+        if (rc == -EINPROGRESS) break;
+        p->cleanup_sequence = 0;
+        if (rc < 0 || result < 0 || p->responded) p->stage = QUARANTINED;
+        else free_retired_session(p);
+        break;
     }
-    if (p->stage == QUARANTINED)
-        UTLT_Error("Failed establishment SEID=%lu retained inactive: rollback uncertain; restart after repairing PF/classifier state",
+    if (p->stage == QUARANTINED) {
+        if (p->deleting && !p->responded) reject(p, PFCP_CAUSE_SYSTEM_FAILURE);
+        UTLT_Error("Session SEID=%" PRIu64 " retained inactive: cleanup uncertain; restart after repairing PF/classifier state",
                    p->session->upfSeid);
+    }
 }
 
 int UpfScalingInit(void) {
@@ -484,6 +645,7 @@ int UpfScalingInit(void) {
 int UpfScalingEnqueue(Bufblk *message, PfcpXact *xact) {
     uint64_t admission_started = rte_get_timer_cycles();
     if (control_error) return control_error;
+    cancel_downscale();
     for (unsigned i = 0; i < MAX_PENDING; i++) {
         struct Pending *p = &requests[i];
         if (p->message) continue;
@@ -494,6 +656,28 @@ int UpfScalingEnqueue(Bufblk *message, PfcpXact *xact) {
         xact->applicationPending = 1;
         UTLT_Info("Admission received: xid=%u xact=%u", p->transaction_id, p->xact_index);
         p->slot = select_worker(p);
+        return 0;
+    }
+    return -ENOSPC;
+}
+
+int UpfScalingDelete(Bufblk *message, PfcpXact *xact, UpfSession *session) {
+    if (control_error) return control_error;
+    if (session->admission_pending || session->deletion_pending) return -EBUSY;
+    int slot = -1;
+    for (uint16_t i = 0; i < Self()->scaling.slot_count; i++)
+        if (Self()->scaling.slots[i].service_id == session->worker.service_id) { slot = i; break; }
+    if (slot < 0 || g_upf_workers->runtime[slot].state != UPF_WORKER_READY) return -ENODEV;
+    for (unsigned i = 0; i < MAX_PENDING; i++) {
+        struct Pending *p = &requests[i];
+        if (p->message) continue;
+        *p = (struct Pending){.message = message, .xact = xact, .peer = xact->gnode,
+            .xact_index = xact->index, .transaction_id = xact->transactionId,
+            .session = session, .slot = slot, .deleting = 1, .smf_seid = session->smfSeid,
+            .stage = ROLLBACK_STEERING, .deadline = after_ms(60000), .admission_started = rte_get_timer_cycles()};
+        __atomic_store_n(&session->deletion_pending, 1, __ATOMIC_RELEASE);
+        xact->applicationPending = 1;
+        UTLT_Info("Deletion received: SEID=%" PRIu64 " slot=%d xid=%u", session->upfSeid, slot, xact->transactionId);
         return 0;
     }
     return -ENOSPC;
@@ -526,9 +710,10 @@ int UpfControlLoop(struct onvm_nf_local_ctx *ctx) {
     }
     if (UpfWorkerPollingStatus() < 0) control_error = UpfWorkerPollingStatus();
     advance_start();
-    if (control_ready && starting < 0 && live_count() < Self()->scaling.min_workers) start_worker();
-    sample_load();
+    advance_stop();
+    if (control_ready && !control_error && starting < 0 && stopping < 0 && live_count() < Self()->scaling.min_workers) start_worker();
     for (unsigned i = 0; i < MAX_PENDING; i++) if (requests[i].message) advance_request(&requests[i]);
+    sample_load();
     UpfClsCollect();
     return 0;
 }
