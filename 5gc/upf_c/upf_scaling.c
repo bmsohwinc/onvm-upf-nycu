@@ -736,10 +736,77 @@ int UpfControlLoop(struct onvm_nf_local_ctx *ctx) {
     return 0;
 }
 
-void UpfScalingStop(void) {
-    for (uint16_t i = 0; i < Self()->scaling.slot_count; i++) {
-        state(i, UPF_WORKER_FAILED);
-        if (children[i] > 0) kill(-children[i], SIGTERM);
+static int wait_shutdown_worker(uint16_t slot, uint64_t deadline) {
+    const UpfWorkerSlotConfig *s = &Self()->scaling.slots[slot];
+    for (;;) {
+        if (children[slot] > 0) {
+            int status;
+            pid_t rc = waitpid(children[slot], &status, WNOHANG);
+            if (rc > 0 || (rc < 0 && errno == ECHILD)) {
+                UTLT_Info("Shutdown slot=%u process exited: pid=%d exit_code=%d signal=%d",
+                          slot, children[slot], rc > 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+                          rc > 0 && WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+                children[slot] = 0;
+                __atomic_store_n(&g_upf_workers->runtime[slot].reader_generation, 0, __ATOMIC_RELEASE);
+            } else if (rc < 0 && errno != EINTR) return -errno;
+        }
+        if (!children[slot] && UpfWorkerNfTryLock()) {
+            int busy = service_counts[s->service_id] || manager_cores[s->core].nf_count ||
+                       manager_cores[s->core].is_dedicated_core;
+            UpfWorkerNfUnlock();
+            if (!busy) return 0;
+        }
+        if (rte_get_timer_cycles() >= deadline) return -ETIMEDOUT;
+        usleep(1000);
     }
-    /* Manager tears down NFs. No classifier memory is reclaimed after shutdown. */
+}
+
+void UpfScalingStop(void) {
+    const UpfScalingConfig *c = &Self()->scaling;
+    /* The NF loop has joined: no further admissions, starts or classifier reclamation.
+     * FAILED disables ingress and rejects any in-flight polling enable request.
+     * Session/PF state remains installed until the deployment is restarted.
+     */
+    for (uint16_t i = 0; i < c->slot_count; i++) state(i, UPF_WORKER_FAILED);
+    int graceful = 1;
+    for (uint16_t i = 0; i < c->slot_count; i++) {
+        UpfWorkerRuntime *r = &g_upf_workers->runtime[i];
+        if (!children[i] && !r->instance_id && !r->registered_instance) continue;
+        uint64_t deadline = after_ms(graceful ? c->worker_stop_timeout_ms : 2000);
+        uint32_t sequence = 0;
+        int rc = 0;
+        if (graceful && r->instance_id) {
+            UpfWorkerPollUpdate update = {.slot = i, .instance_id = r->instance_id, .generation = r->generation};
+            do {
+                int32_t result;
+                if (!sequence) rc = UpfWorkerPollRequest(&update, &sequence);
+                else {
+                    rc = UpfWorkerPollResult(sequence, &result);
+                    if (!rc) { rc = result; break; }
+                }
+                if (rc && rc != -EBUSY && rc != -EAGAIN && rc != -EINPROGRESS) break;
+                if (rte_get_timer_cycles() >= deadline) { rc = -ETIMEDOUT; break; }
+                usleep(1000);
+            } while (1);
+            /* ESTALE means this generation was never activated or was already forgotten. */
+            if (rc && rc != -ESTALE) UTLT_Error("Shutdown slot=%u polling disable failed: error=%d", i, rc);
+        }
+        if (children[i] > 0) {
+            UTLT_Info("Shutdown slot=%u sending %s: pid=%d", i, graceful ? "SIGTERM" : "SIGKILL", children[i]);
+            if (kill(-children[i], graceful ? SIGTERM : SIGKILL) < 0 && errno != ESRCH)
+                UTLT_Error("Shutdown slot=%u signal failed: %s", i, strerror(errno));
+        }
+        rc = wait_shutdown_worker(i, deadline);
+        if (rc && children[i] > 0 && graceful) {
+            UTLT_Error("Shutdown slot=%u process did not exit: error=%d; sending SIGKILL", i, rc);
+            if (kill(-children[i], SIGKILL) < 0 && errno != ESRCH)
+                UTLT_Error("Shutdown slot=%u SIGKILL failed: %s", i, strerror(errno));
+            rc = wait_shutdown_worker(i, after_ms(2000));
+        }
+        if (rc) {
+            UTLT_Error("Shutdown slot=%u incomplete: error=%d stage=%s; remaining workers will be killed without cleanup",
+                       i, rc, children[i] ? "process-exit" : "manager-release");
+            graceful = 0; /* Do not overlap more graceful cleanup with a stalled teardown. */
+        } else UTLT_Info("Shutdown slot=%u complete: process exited, manager_released=1", i);
+    }
 }

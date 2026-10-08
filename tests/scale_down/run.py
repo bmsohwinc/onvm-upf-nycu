@@ -35,6 +35,7 @@ with tempfile.TemporaryDirectory(prefix="upf-scale-down-") as directory:
     build = Path(directory)
     lifecycle = scaler[scaler.index("#define MAX_PENDING"):scaler.index("int UpfScalingInit")]
     lifecycle += scaler[scaler.index("int UpfScalingEnqueue"):scaler.index("int UpfControlLoop")]
+    lifecycle += function(scaler, "wait_shutdown_worker") + "\n" + function(scaler, "UpfScalingStop")
     (build / "lifecycle.inc").write_text(lifecycle)
     (build / "response.inc").write_text(function(builder, "UpfN4BuildSessionDeletionResponse") + "\n" +
                                        function(handler, "UpfN4SendDeletionResponse"))

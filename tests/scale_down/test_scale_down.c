@@ -79,6 +79,8 @@ static uint64_t now;
 static uint32_t safe_version;
 static int frees, responses, term_calls, kill_calls, exit_ready, spawn_calls, retire_error, cache_error;
 static int exit_status;
+static int shutting_down, shutdown_fault, shutdown_signals[2], shutdown_reaped[2];
+static uint64_t shutdown_sent[2], shutdown_exited[2];
 static uint64_t built_seid;
 static uint8_t built_cause;
 int rte_errno;
@@ -145,16 +147,54 @@ static int mock_spawn(pid_t *pid, const char *p, const posix_spawn_file_actions_
 }
 static int mock_kill(pid_t pid, int signal) {
     assert(pid < 0); if (signal == SIGTERM) term_calls++; else { assert(signal == SIGKILL); kill_calls++; }
+    if (shutting_down) {
+        int slot = -pid - 100;
+        assert(slot >= 0 && slot < 2);
+        if (signal == SIGTERM && slot) {
+            assert(shutdown_reaped[slot - 1]);
+            assert(!counts[14 + slot - 1] && !cores[3 + slot - 1].nf_count);
+        }
+        if (signal == SIGTERM && !shutdown_fault && registry.runtime[slot].instance_id)
+            assert(registry.poll_ack_seq == registry.poll_request_seq && !registry.poll_request.enable);
+        shutdown_signals[slot] = signal; shutdown_sent[slot] = now;
+    }
     return 0;
 }
 static pid_t mock_waitpid(pid_t pid, int *status, int flags) {
     assert(flags == WNOHANG);
+    if (shutting_down) {
+        int slot = pid - 100;
+        assert(slot >= 0 && slot < 2 && !shutdown_reaped[slot]);
+        if (!shutdown_signals[slot] || now - shutdown_sent[slot] < 3 ||
+            (slot == 0 && (shutdown_fault == 4 ||
+             (shutdown_fault == 1 && shutdown_signals[slot] != SIGKILL)))) return 0;
+        *status = shutdown_signals[slot] == SIGKILL ? SIGKILL : 0;
+        shutdown_reaped[slot] = 1; shutdown_exited[slot] = now;
+        return pid;
+    }
     if (!exit_ready || pid != 101) return 0;
     *status = exit_status; exit_ready = 0; return pid;
+}
+static int mock_usleep(useconds_t usec) {
+    assert(usec == 1000); now++;
+    if (shutting_down) {
+        if (shutdown_fault != 3) {
+            if (registry.poll_request.enable)
+                assert(registry.runtime[registry.poll_request.slot].state == UPF_WORKER_FAILED);
+            registry.poll_result = registry.poll_request.enable ? -ECANCELED : 0;
+            registry.poll_ack_seq = registry.poll_request_seq;
+        }
+        for (int i = 0; i < 2; i++)
+            if (shutdown_reaped[i] && now - shutdown_exited[i] >= 4 && shutdown_fault != 2) {
+                counts[14 + i] = cores[3 + i].nf_count = cores[3 + i].is_dedicated_core = 0;
+            }
+    }
+    return 0;
 }
 #define posix_spawn mock_spawn
 #define kill mock_kill
 #define waitpid mock_waitpid
+#define usleep mock_usleep
 #include "lifecycle.inc"
 
 static int g_worker_slot, purges;
@@ -209,6 +249,9 @@ static void setup(void) {
     now = last_queue_sample = 0; steer_consumed = startup_sequence = shutdown_sequence = 0;
     frees = responses = term_calls = kill_calls = exit_ready = spawn_calls = retire_error = cache_error = purges = 0;
     exit_status = 0;
+    shutting_down = shutdown_fault = 0;
+    memset(shutdown_signals, 0, sizeof(shutdown_signals));
+    memset(shutdown_reaped, 0, sizeof(shutdown_reaped));
     safe_version = 0; next_teid = 4097;
     reset_queue_windows();
     xact = (PfcpXact){.index = 1, .transactionId = 10, .gnode = &peer, .timerHolding = 1,
@@ -306,6 +349,36 @@ int main(void) {
     assert(stopping < 0 && registry.runtime[1].state == UPF_WORKER_FAILED && !registry.runtime[1].reader_generation);
     assert(start_worker() == -ENOSPC);
 
+    setup(); shutting_down = 1; session_count[0] = session_count[1] = 1;
+    UpfScalingStop();
+    assert(term_calls == 2 && !kill_calls && !children[0] && !children[1]);
+    assert(!counts[14] && !counts[15] && !registry.runtime[0].reader_generation);
+    assert(session_count[0] == 1 && session_count[1] == 1 && !frees && !registry.steer_request_seq);
+    assert(registry.runtime[0].state == UPF_WORKER_FAILED && registry.runtime[1].state == UPF_WORKER_FAILED);
+
+    setup(); shutting_down = 1; /* Shutdown while a startup polling request is outstanding. */
+    registry.poll_request_seq = 1; registry.poll_request.enable = 1;
+    UpfScalingStop();
+    assert(term_calls == 2 && !kill_calls && registry.poll_request_seq == 3);
+    setup(); shutting_down = 1; registry.runtime[0].instance_id = registry.runtime[0].registered_instance = 0;
+    registry.runtime[0].state = UPF_WORKER_STARTING;
+    UpfScalingStop(); assert(term_calls == 2 && !kill_calls); /* Child has not registered yet. */
+
+    setup(); shutting_down = 1; shutdown_fault = 1;
+    UpfScalingStop(); assert(term_calls == 2 && kill_calls == 1 && !children[0] && !children[1]);
+    setup(); shutting_down = 1; shutdown_fault = 2; registry.nf_lock = 1;
+    UpfScalingStop(); /* Missing manager release must not start another graceful cleanup. */
+    assert(term_calls == 1 && kill_calls == 1 && shutdown_signals[1] == SIGKILL && now <= 2100);
+    assert(!children[0] && !children[1] && counts[14] && counts[15]);
+    setup(); shutting_down = 1; shutdown_fault = 3;
+    UpfScalingStop(); assert(kill_calls && now <= 4200); /* Missing poll ACK remains bounded. */
+    assert(registry.poll_request_seq == 1 && !registry.poll_ack_seq); /* Never overwrite pending mailbox. */
+    setup(); shutting_down = 1; shutdown_fault = 4;
+    UpfScalingStop(); assert(term_calls == 1 && kill_calls == 2 && now <= 4100);
+    assert(children[0] && registry.runtime[0].reader_generation); /* Unconfirmed exit retains reader. */
+    setup(); context.scaling.slot_count = 0; g_upf_workers = NULL;
+    UpfScalingStop(); assert(!term_calls && !kill_calls);
+
     setup(); delete_to_cleanup();
     dispatch_deletion(message()); assert(!responses && !frees && session_count[1] == 1);
     Bufblk *duplicate = message(); assert(UpfScalingDelete(duplicate, &xact, &session) == -EBUSY); BufblkFree(duplicate);
@@ -340,6 +413,6 @@ int main(void) {
     safe_version = 4; advance_request(&requests[0]);
     assert(frees == 1 && !session_count[0] && !requests[0].message);
     setup();
-    puts("PASS: hold policy, deletion/cleanup ACKs, rollback counts, shutdown ordering and slot reuse");
+    puts("PASS: hold policy, deletion/cleanup ACKs, rollback counts, serial shutdown/timeouts and slot reuse");
     return 0;
 }

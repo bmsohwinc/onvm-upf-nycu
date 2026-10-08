@@ -304,3 +304,25 @@ ONVM library, then restart. Retest on CN by attaching UE3 to slot 2, releasing
 its PDU session, confirming `Deleted SEID`, reducing the other workers' load,
 and observing INACTIVE plus removal from manager. Finally verify slot reuse.
 The fix still requires this Linux/DPDK integration validation.
+
+## Run24 follow-up: serial full shutdown
+
+UE3's Ctrl+C produced gNB signal loss without PFCP session deletion; slot 2
+therefore remained occupied. Use UERANSIM `ps-release 1` for UE3's PDU session
+and confirm `Deleted SEID=3` before testing the scale-down hold.
+
+Full shutdown previously signaled every worker at once. `UpfScalingStop()` now
+disables ingress, then stops each worker and waits for both process exit and
+manager core/service release before signaling the next. It runs after the NF
+loop joins. Existing sessions and PF filters are retained for deployment restart;
+this is separate from session-free downscaling and does not make slots reusable.
+Each graceful teardown uses `worker_stop_timeout_ms`, with a further 2 s after
+SIGKILL if the process did not exit. If teardown remains incomplete, subsequent
+workers receive SIGKILL with bounded waits, avoiding additional graceful cleanup
+overlapping the stalled operation. Logs identify the slot and unfinished stage.
+
+Runtime edits are limited to `upf_scaling.c`; configuration and ABI are unchanged.
+Regression tests mock processes, polling ACKs and manager release. The change
+addresses overlapping worker shutdown; resolving run24's DPDK `mp_malloc_sync`
+retry flood still requires CN validation. Rebuild UPF-C and keep the manager
+running until UPF-C's shutdown completes.

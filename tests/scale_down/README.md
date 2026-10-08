@@ -9,6 +9,8 @@ Coverage: continuous holds, minimum workers, busy-peer spare retention, pending
 admissions, session accounting, classifier/owner cleanup ACKs, graceful stop
 ordering, failed cleanup, generation reuse, PFCP replay after session removal,
 UE hash collisions, shaper buffer reclamation and ixgbe filter readback.
+Full-shutdown checks cover sequential exit/manager release, active sessions,
+startup in progress, missing polling ACKs, stuck manager locks and SIGKILL fallback.
 On Linux, the filter test uses the system ethtool definitions; macOS uses the
 equivalent fields needed by the builder. Dispatcher coverage extracts its
 session/deletion routing prefix and uses the real transaction receive logic.
