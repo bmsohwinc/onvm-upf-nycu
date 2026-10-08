@@ -272,3 +272,35 @@ Remaining design limits are intentional: existing-session load is not migrated;
 low queue occupancy does not imply zero sessions; failed cleanup has conservative
 retention rather than automatic repair. Threshold/window/hold tuning and any
 future session migration are separate work.
+
+## Run23 follow-up: termination signals
+
+Run23 loaded the expected configuration. Slots 2 and 3 each completed a 30.005 s
+hold, removed their N3 filters successfully, then hit the 5 s process-exit
+deadline. They exited about 5.5 ms after the timeout's SIGKILL. Manager retained
+their NF registrations because forced exit bypassed normal deregistration.
+These were unused spares; no PFCP session deletions occurred in this run.
+
+The code exposed a signal-mask inheritance bug: UPF-C spawns from an ONVM thread
+with SIGTERM/SIGINT blocked, and the original spawn attributes preserved that
+mask. A local real-process test reproduced the failure; target thread masks
+were not captured. Simply increasing the timeout would not unblock SIGTERM.
+
+The follow-up fix is confined to `upf_scaling.c` and `onvm_nflib.c` at runtime:
+
+- Spawn with an explicit empty signal mask, retaining the process group.
+- Keep the packet thread's termination signals blocked; explicitly unblock
+  SIGTERM/SIGINT on the main NF thread while it joins the packet thread. Restore
+  the caller's mask afterward; ONVM child-NF contexts retain their masks.
+- A callback may request stopping but must never write `keep_running=1` over a
+  concurrent signal's stop request. Cleanup stays outside the signal handler.
+- Log SIGTERM submission, process exit code/signal and the stage of a timeout;
+  INACTIVE now includes `manager_released=1` after core/service release.
+
+Real-process regression tests now supplement the earlier mocks, including a
+worker that does not exit and requires SIGKILL. The registry ABI remains 7 and
+timeouts are unchanged. Rebuild manager and affected NFs against the updated
+ONVM library, then restart. Retest on CN by attaching UE3 to slot 2, releasing
+its PDU session, confirming `Deleted SEID`, reducing the other workers' load,
+and observing INACTIVE plus removal from manager. Finally verify slot reuse.
+The fix still requires this Linux/DPDK integration validation.

@@ -574,14 +574,27 @@ onvm_nflib_start_nf(struct onvm_nf_local_ctx *nf_local_ctx, struct onvm_nf_init_
 int
 onvm_nflib_run(struct onvm_nf_local_ctx *nf_local_ctx) {
         int ret;
+        int is_main = nf_local_ctx == main_nf_local_ctx;
+        sigset_t termination, saved_mask;
+        sigemptyset(&termination);
+        sigaddset(&termination, SIGINT);
+        sigaddset(&termination, SIGTERM);
+        /* The packet thread inherits blocked signals; the main NF thread
+         * receives termination while joining it. Child NFs keep their mask. */
+        if (is_main && (ret = pthread_sigmask(SIG_BLOCK, &termination, &saved_mask)) != 0)
+                rte_exit(EXIT_FAILURE, "Failed to block NF termination signals, error %d", ret);
 
         pthread_t main_loop_thread;
-        if ((ret = pthread_create(&main_loop_thread, NULL, onvm_nflib_thread_main_loop, (void *)nf_local_ctx)) < 0) {
+        if ((ret = pthread_create(&main_loop_thread, NULL, onvm_nflib_thread_main_loop, (void *)nf_local_ctx)) != 0) {
                 rte_exit(EXIT_FAILURE, "Failed to spawn main loop thread, error %d", ret);
         }
-        if ((ret = pthread_join(main_loop_thread, NULL)) < 0) {
+        if (is_main && (ret = pthread_sigmask(SIG_UNBLOCK, &termination, NULL)) != 0)
+                rte_exit(EXIT_FAILURE, "Failed to unblock NF termination signals, error %d", ret);
+        if ((ret = pthread_join(main_loop_thread, NULL)) != 0) {
                 rte_exit(EXIT_FAILURE, "Failed to join with main loop thread, error %d", ret);
         }
+        if (is_main && (ret = pthread_sigmask(SIG_SETMASK, &saved_mask, NULL)) != 0)
+                rte_exit(EXIT_FAILURE, "Failed to restore NF signal mask, error %d", ret);
 
         return 0;
 }
@@ -665,10 +678,10 @@ onvm_nflib_thread_main_loop(void *arg) {
                         timing.window.tx_ticks += timing_tx_end - timing.handled;
                 }
                 onvm_nflib_dequeue_messages(nf_local_ctx);
-                if (nf->function_table->user_actions != ONVM_NO_CALLBACK) {
-                        rte_atomic16_set(&nf_local_ctx->keep_running,
-                                         !(*nf->function_table->user_actions)(nf_local_ctx) &&
-                                         rte_atomic16_read(&nf_local_ctx->keep_running));
+                if (nf->function_table->user_actions != ONVM_NO_CALLBACK &&
+                    (*nf->function_table->user_actions)(nf_local_ctx)) {
+                        /* Never overwrite a concurrent signal's stop request with 1. */
+                        rte_atomic16_set(&nf_local_ctx->keep_running, 0);
                 }
 
                 if (unlikely(timing.file && timing.sample)) {

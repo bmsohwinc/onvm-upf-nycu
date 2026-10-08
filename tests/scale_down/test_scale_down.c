@@ -78,6 +78,7 @@ static struct { uint32_t version; } classifier, *g_upf_cls_ctrl = &classifier;
 static uint64_t now;
 static uint32_t safe_version;
 static int frees, responses, term_calls, kill_calls, exit_ready, spawn_calls, retire_error, cache_error;
+static int exit_status;
 static uint64_t built_seid;
 static uint8_t built_cause;
 int rte_errno;
@@ -149,7 +150,7 @@ static int mock_kill(pid_t pid, int signal) {
 static pid_t mock_waitpid(pid_t pid, int *status, int flags) {
     assert(flags == WNOHANG);
     if (!exit_ready || pid != 101) return 0;
-    *status = 0; exit_ready = 0; return pid;
+    *status = exit_status; exit_ready = 0; return pid;
 }
 #define posix_spawn mock_spawn
 #define kill mock_kill
@@ -207,6 +208,7 @@ static void setup(void) {
     starting = stopping = down_candidate = -1; control_ready = 1; control_error = 0;
     now = last_queue_sample = 0; steer_consumed = startup_sequence = shutdown_sequence = 0;
     frees = responses = term_calls = kill_calls = exit_ready = spawn_calls = retire_error = cache_error = purges = 0;
+    exit_status = 0;
     safe_version = 0; next_teid = 4097;
     reset_queue_windows();
     xact = (PfcpXact){.index = 1, .transactionId = 10, .gnode = &peer, .timerHolding = 1,
@@ -263,6 +265,7 @@ int main(void) {
     advance_stop(); assert(registry.runtime[1].reader_generation == 1);
     exit_ready = 1; reap_workers(); advance_stop();
     assert(registry.runtime[1].reader_generation == 0 && stopping == 1); /* Manager still owns core/service. */
+    assert(!strcmp(stop_stage(), "manager-release"));
     counts[15] = cores[4].nf_count = cores[4].is_dedicated_core = 0;
     advance_stop(); assert(stopping < 0 && registry.runtime[1].state == UPF_WORKER_INACTIVE);
     assert(!registry.runtime[1].registered_instance && registry.runtime[1].generation == 1);
@@ -294,6 +297,14 @@ int main(void) {
     assert(start_worker() == -ENOSPC);
     setup(); start_stop(); advance_stop(); ack_steer(-EIO); advance_stop();
     assert(registry.runtime[1].state == UPF_WORKER_FAILED && !registry.poll_request_seq);
+
+    setup(); start_stop(); advance_stop(); ack_steer(0); advance_stop(); ack_poll(0); advance_stop();
+    assert(term_calls == 1 && !strcmp(stop_stage(), "process-exit"));
+    now += 101; reap_workers();
+    assert(kill_calls == 1 && registry.runtime[1].state == UPF_WORKER_FAILED);
+    exit_ready = 1; exit_status = SIGKILL; reap_workers(); advance_stop();
+    assert(stopping < 0 && registry.runtime[1].state == UPF_WORKER_FAILED && !registry.runtime[1].reader_generation);
+    assert(start_worker() == -ENOSPC);
 
     setup(); delete_to_cleanup();
     dispatch_deletion(message()); assert(!responses && !frees && session_count[1] == 1);

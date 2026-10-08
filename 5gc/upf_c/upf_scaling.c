@@ -71,6 +71,26 @@ static int live_count(void) {
     return count;
 }
 
+static int spawn_worker(pid_t *pid, char *const argv[]) {
+    posix_spawnattr_t attr;
+    int rc = posix_spawnattr_init(&attr);
+    if (rc) return rc;
+    /* ONVM's polling thread blocks termination signals; the child must not inherit that mask. */
+    sigset_t mask;
+    sigemptyset(&mask);
+    rc = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK);
+    if (!rc) rc = posix_spawnattr_setpgroup(&attr, 0);
+    if (!rc) rc = posix_spawnattr_setsigmask(&attr, &mask);
+    if (!rc) rc = posix_spawn(pid, argv[0], NULL, &attr, argv, environ);
+    posix_spawnattr_destroy(&attr);
+    return rc;
+}
+
+static const char *stop_stage(void) {
+    static const char *const names[] = {"n3-delete", "n3-ack", "poll-disable", "poll-ack", "queue-drain", "process-exit"};
+    return shutdown_stage == STOP_EXIT && !children[stopping] ? "manager-release" : names[shutdown_stage];
+}
+
 static int start_worker(void) {
     if (stopping >= 0) return -EAGAIN;
     if (starting >= 0) return starting;
@@ -98,15 +118,8 @@ static int start_worker(void) {
     char *argv[] = {Self()->scaling.worker_binary, "-l", core, "-n", "4",
         "--proc-type=secondary", "--file-prefix", Self()->scaling.file_prefix,
         "--no-pci", "--", "-r", service, "-m", "--", NULL};
-    posix_spawnattr_t attr;
     startup_started = rte_get_timer_cycles();
-    int rc = posix_spawnattr_init(&attr);
-    if (!rc) {
-        rc = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
-        if (!rc) rc = posix_spawnattr_setpgroup(&attr, 0);
-        if (!rc) rc = posix_spawn(&children[slot], argv[0], NULL, &attr, argv, environ);
-        posix_spawnattr_destroy(&attr);
-    }
+    int rc = spawn_worker(&children[slot], argv);
     uint64_t spawn_finished = rte_get_timer_cycles();
     if (rc) {
         children[slot] = 0;
@@ -296,7 +309,8 @@ static void reap_workers(void) {
         if (!rc) {
             if (stop_deadline[i] && rte_get_timer_cycles() > stop_deadline[i]) {
                 state(i, UPF_WORKER_FAILED);
-                UTLT_Error("UPF-U slot %u stop timed out; slot will not be reused", i);
+                UTLT_Error("UPF-U slot %u stop timed out: stage=%s; sending SIGKILL; slot will not be reused",
+                           i, i == stopping ? stop_stage() : "failure-exit");
                 kill(-children[i], SIGKILL); stop_deadline[i] = 0;
             }
             continue;
@@ -306,6 +320,9 @@ static void reap_workers(void) {
         int planned = i == stopping && shutdown_stage == STOP_EXIT &&
             g_upf_workers->runtime[i].state == UPF_WORKER_STOPPING && rc > 0 &&
             WIFEXITED(status) && !WEXITSTATUS(status);
+        UTLT_Info("UPF-U slot=%u process exited: pid=%d exit_code=%d signal=%d planned=%d",
+                  i, children[i], rc > 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+                  rc > 0 && WIFSIGNALED(status) ? WTERMSIG(status) : 0, planned);
         if (!planned) {
             UTLT_Warning("UPF-U slot %u exited; existing sessions are not reassigned", i);
             state(i, UPF_WORKER_FAILED);
@@ -318,7 +335,7 @@ static void reap_workers(void) {
 }
 
 static void fail_stop(int error) {
-    UTLT_Error("UPF-U slot=%d stop failed: error=%d; slot retained FAILED", stopping, error);
+    UTLT_Error("UPF-U slot=%d stop failed: stage=%s error=%d; slot retained FAILED", stopping, stop_stage(), error);
     state(stopping, UPF_WORKER_FAILED);
     if (children[stopping] > 0) {
         kill(-children[stopping], SIGTERM);
@@ -365,6 +382,7 @@ static void advance_stop(void) {
         if (!drained) return;
         shutdown_stage = STOP_EXIT;
         if (kill(-children[stopping], SIGTERM) < 0) { fail_stop(-errno); return; }
+        UTLT_Info("UPF-U slot=%d SIGTERM sent: pid=%d; waiting for process exit", stopping, children[stopping]);
         stop_deadline[stopping] = shutdown_deadline;
     } else if (shutdown_stage == STOP_EXIT && !children[stopping]) {
         if (!UpfWorkerNfTryLock()) return;
@@ -373,7 +391,7 @@ static void advance_stop(void) {
         if (busy) return;
         r->instance_id = r->registered_instance = r->ack_version = r->ack_generation = 0;
         state(stopping, UPF_WORKER_INACTIVE);
-        UTLT_Info("UPF-U slot=%d INACTIVE stop_ms=%.3f", stopping,
+        UTLT_Info("UPF-U slot=%d INACTIVE stop_ms=%.3f manager_released=1", stopping,
                   elapsed_ms(shutdown_started, rte_get_timer_cycles()));
         stopping = -1;
         reset_queue_windows();
