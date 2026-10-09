@@ -70,6 +70,21 @@ static struct rte_mbuf *packet(unsigned ue) {
     p->data[30] = 10; p->data[31] = 60; p->data[33] = ue; p->data[39] = 8;
     return p;
 }
+static struct rte_mbuf *uplink(unsigned ue) {
+    struct rte_mbuf *p = packet(ue);
+    p->port = 0; p->data_len = 78;
+    memmove(p->data + 50, p->data + 14, 28);
+    memset(p->data + 14, 0, 36);
+    p->data[14] = 0x45; p->data[17] = 64; p->data[23] = 17;
+    p->data[26] = 10; p->data[27] = 10; p->data[28] = 2; p->data[29] = 1;
+    p->data[30] = 10; p->data[31] = 10; p->data[32] = 2; p->data[33] = 11;
+    p->data[36] = 8; p->data[37] = 0x68; p->data[39] = 44; /* UDP/2152 */
+    p->data[42] = 0x30; p->data[43] = 255; p->data[45] = 28;
+    p->data[48] = 0x10; p->data[49] = ue; /* TEID 0x1000 + ue */
+    p->data[62] = 10; p->data[63] = 60; p->data[65] = ue;
+    p->data[66] = 10; p->data[67] = 10; p->data[68] = 3; p->data[69] = 2;
+    return p;
+}
 static void empty(struct rte_ring *r) {
     for (unsigned i = 0; i < r->count; i++) rte_pktmbuf_free(r->packets[i]);
     r->count = 0;
@@ -90,7 +105,9 @@ int main(int argc, char **argv) {
     assert(upf_u_lb_init(&nfs[15]) == 0 && !upf_u_lb_arp_responder());
     assert(upf_u_lb_enabled());
     struct rte_mbuf *batch[40];
-    for (unsigned i = 0; i < 40; i++) batch[i] = packet(i % 2 + 1);
+    /* Mixed UL/DL bursts must reach the same per-session worker rings. */
+    for (unsigned i = 0; i < 40; i++)
+        batch[i] = i % 4 < 2 ? uplink(i % 2 + 1) : packet(i % 2 + 1);
     onvm_pkt_process_rx_batch(&q, batch, 40);
     assert(rings[0].count == 20 && rings[1].count == 20 && !fallback);
     assert(nfs[14].stats.rx == 20 && nfs[15].stats.rx == 20);

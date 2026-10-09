@@ -7,20 +7,32 @@
 #include <string.h>
 
 static uint32_t
-hash_ip(uint32_t ip) {
-    ip ^= ip >> 16;
-    ip *= 0x7feb352du;
-    ip ^= ip >> 15;
-    return ip & (UPF_SW_LB_CAPACITY - 1);
+hash_key(uint32_t key) {
+    key ^= key >> 16;
+    key *= 0x7feb352du;
+    key ^= key >> 15;
+    return key & (UPF_SW_LB_CAPACITY - 1);
 }
 
 const struct upf_sw_lb_route *
 upf_sw_lb_lookup(const struct upf_sw_lb *lb, uint32_t ip) {
-    uint32_t slot = hash_ip(ip);
+    uint32_t slot = hash_key(ip);
     for (unsigned n = 0; n < UPF_SW_LB_CAPACITY; n++) {
         const struct upf_sw_lb_route *r = &lb->routes[slot];
         if (!r->instance) return NULL;
         if (r->ue_ip == ip) return r;
+        slot = (slot + 1) & (UPF_SW_LB_CAPACITY - 1);
+    }
+    return NULL;
+}
+
+const struct upf_sw_lb_route *
+upf_sw_lb_lookup_teid(const struct upf_sw_lb *lb, uint32_t teid) {
+    uint32_t slot = hash_key(teid);
+    for (unsigned n = 0; n < UPF_SW_LB_CAPACITY; n++) {
+        const struct upf_sw_lb_route *r = &lb->teid_routes[slot];
+        if (!r->instance) return NULL;
+        if (r->teid == teid) return r;
         slot = (slot + 1) & (UPF_SW_LB_CAPACITY - 1);
     }
     return NULL;
@@ -70,13 +82,15 @@ upf_sw_lb_load(struct upf_sw_lb *lb, const char *path) {
                 lb->route_count == UPF_SW_LB_CAPACITY / 2)
                 goto bad;
             uint32_t ue_ip = ntohl(ip.s_addr);
-            if (upf_sw_lb_lookup(lb, ue_ip)) goto bad;
-            for (unsigned i = 0; i < UPF_SW_LB_CAPACITY; i++)
-                if (lb->routes[i].instance && lb->routes[i].teid == value) goto bad;
-            uint32_t slot = hash_ip(ue_ip);
+            if (upf_sw_lb_lookup(lb, ue_ip) || upf_sw_lb_lookup_teid(lb, value)) goto bad;
+            uint32_t slot = hash_key(ue_ip);
             while (lb->routes[slot].instance)
                 slot = (slot + 1) & (UPF_SW_LB_CAPACITY - 1);
             lb->routes[slot] = (struct upf_sw_lb_route){ue_ip, value, instance};
+            slot = hash_key(value);
+            while (lb->teid_routes[slot].instance)
+                slot = (slot + 1) & (UPF_SW_LB_CAPACITY - 1);
+            lb->teid_routes[slot] = (struct upf_sw_lb_route){ue_ip, value, instance};
             lb->route_count++;
             if (!lb->workers[instance]) { lb->workers[instance] = 1; lb->worker_count++; }
             if (!lb->leader || instance < lb->leader) lb->leader = instance;
@@ -139,27 +153,14 @@ upf_sw_lb_classify(const struct upf_sw_lb *lb, uint16_t port,
     const uint8_t *udp = ip + ihl;
     if (be16(udp + 2) != 2152 || total - ihl < 16) return UPF_SW_LB_DROP;
     const uint8_t *gtp = udp + 8;
-    size_t gtp_len = 8 + be16(gtp + 2), offset = 8;
-    /* GTPv1-U T-PDU, reserved bit clear; E/S/PN are handled below. */
+    size_t gtp_len = 8 + be16(gtp + 2);
+    /* GTPv1-U T-PDU, reserved bit clear, complete base/optional header.
+     * TEID is in the fixed header: leave extensions and inner parsing to UPF-U. */
     if ((gtp[0] & 0xf8) != 0x30 || gtp[1] != 255 || gtp_len != total - ihl - 8)
         return UPF_SW_LB_DROP;
-    if (gtp[0] & 7) {
-        if (gtp_len < 12) return UPF_SW_LB_DROP;
-        offset = 12;
-        uint8_t next = (gtp[0] & 4) ? gtp[11] : 0;
-        while (next) {
-            if (offset >= gtp_len) return UPF_SW_LB_DROP;
-            size_t ext_len = (size_t)gtp[offset] * 4;
-            if (!ext_len || ext_len > gtp_len - offset) return UPF_SW_LB_DROP;
-            next = gtp[offset + ext_len - 1];
-            offset += ext_len;
-        }
-    }
-    const uint8_t *inner = gtp + offset;
-    if (ipv4(inner, gtp_len - offset, &ihl, &total) ||
-        total != gtp_len - offset || !l4_valid(inner, ihl, total)) return UPF_SW_LB_DROP;
-    const struct upf_sw_lb_route *r = upf_sw_lb_lookup(lb, be32(inner + 12));
-    return r && r->teid == be32(gtp + 4) ? r->instance : UPF_SW_LB_DROP;
+    if ((gtp[0] & 7) && gtp_len < 12) return UPF_SW_LB_DROP;
+    const struct upf_sw_lb_route *r = upf_sw_lb_lookup_teid(lb, be32(gtp + 4));
+    return r ? r->instance : UPF_SW_LB_DROP;
 }
 
 int

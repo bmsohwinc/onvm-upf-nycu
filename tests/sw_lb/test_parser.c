@@ -29,6 +29,8 @@ static void config(void) {
     assert(lb.worker_count == 2 && lb.leader == 14 && lb.route_count == 2);
     assert(upf_sw_lb_lookup(&lb, 0x0a3c0001)->instance == 14);
     assert(!upf_sw_lb_lookup(&lb, 0x0a3c0003));
+    assert(upf_sw_lb_lookup_teid(&lb, 0x1001)->instance == 14);
+    assert(!upf_sw_lb_lookup_teid(&lb, 0x1003));
 }
 
 static size_t ip(uint8_t *p, uint32_t src, uint32_t dst, int proto, int options) {
@@ -83,11 +85,17 @@ int main(void) {
                     }
     size_t n = packet(good, 1, 1, 17, 1, 0);
     memcpy(p, good, n); w32(p + 46, 0x1002); /* another UE's TEID */
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == 15); /* TEID alone selects owner */
+    memcpy(p, good, n); w32(p + 46, 0x1003); /* unknown TEID, known inner UE */
     assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
+    memcpy(p, good, n); w32(p + 62 + 12, 0x0a3c0063); /* unknown inner UE */
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == 14);
+    memcpy(p, good, n); memset(p + 62, 0, n - 62); /* no valid inner IP/L4 */
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == 14); /* worker handles inner parsing */
     memcpy(p, good, n); p[54] = 0; /* zero extension length */
-    assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == 14); /* extensions are worker's responsibility */
     memcpy(p, good, n); p[54] = 255;
-    assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == 14);
     memcpy(p, good, n); p[42] = 0x20; /* wrong GTP protocol type */
     assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
     memcpy(p, good, n); p[43] = 1; /* GTP Echo is not a T-PDU */
@@ -95,7 +103,14 @@ int main(void) {
     memcpy(p, good, n); p[20] = 0x20; /* outer fragment */
     assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
     memcpy(p, good, n); p[14 + 20 + 8 + 20 + 6] = 0x20; /* inner fragment */
-    assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == 14);
+    /* Coherent outer lengths but incomplete fixed/optional GTP header. */
+    for (unsigned bytes = 0; bytes < 12; bytes++) {
+        memcpy(p, good, n);
+        w16(p + 16, 20 + 8 + bytes); w16(p + 38, 8 + bytes);
+        if (bytes >= 8) w16(p + 44, bytes - 8);
+        assert(upf_sw_lb_classify(&lb, 0, p, 42 + bytes) == UPF_SW_LB_DROP);
+    }
     n = packet(p, 0, 3, 17, 0, 0);
     assert(upf_sw_lb_classify(&lb, 1, p, n) == UPF_SW_LB_DROP);
     assert(upf_sw_lb_classify(&lb, 9, NULL, 0) == 0);
@@ -140,6 +155,30 @@ int main(void) {
     assert(load(base) < 0);
     assert(load(routes) < 0);
     assert(load("n3 0 10.10.2.11\nn6 0 10.10.3.11\nsession 1 10.60.0.1 14\n") < 0);
+
+    /* Exercise both hash tables at capacity, including collision chains,
+     * full-width TEIDs and multiple sessions sharing each worker. */
+    char many[100000];
+    size_t used = (size_t)snprintf(many, sizeof(many), "%s", base);
+    for (unsigned i = 1; i <= 1024; i++)
+        used += (size_t)snprintf(many + used, sizeof(many) - used,
+                                "session 0x%x 10.60.%u.%u %u\n",
+                                UINT32_MAX - i + 1, i >> 8, i & 255, 14 + i % 4);
+    assert(load(many) == 0 && lb.route_count == 1024 && lb.worker_count == 4);
+    for (unsigned i = 1; i <= 1024; i++) {
+        uint32_t teid = UINT32_MAX - i + 1;
+        int owner = 14 + i % 4;
+        assert(upf_sw_lb_lookup(&lb, 0x0a3c0000 + i)->teid == teid);
+        assert(upf_sw_lb_lookup_teid(&lb, teid)->ue_ip == 0x0a3c0000 + i);
+        n = packet(p, 0, i, 17, 0, 0);
+        assert(upf_sw_lb_classify(&lb, 1, p, n) == owner);
+        n = packet(p, 1, i, 17, 0, 0); w32(p + 46, teid);
+        assert(upf_sw_lb_classify(&lb, 0, p, n) == owner);
+    }
+    assert(!upf_sw_lb_lookup(&lb, 0x0a3d0001));
+    assert(!upf_sw_lb_lookup_teid(&lb, 0x12345678));
+    snprintf(many + used, sizeof(many) - used, "session 1 10.61.0.1 14\n");
+    assert(load(many) < 0);
     puts("parser/config/affinity/truncation/fuzz/ACK barrier: PASS");
     return 0;
 }

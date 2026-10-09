@@ -12,23 +12,29 @@ N3/N6 physical port → manager RX: parse + static lookup → pinned worker RX r
 
 ## Dispatch and scope
 
-- UL on N3: validate outer IPv4/UDP/2152, GTPv1-U T-PDU and optional/extension
-  headers; read TEID and inner IPv4 source UE address. Hash the UE address and
-  require its configured TEID to match before dispatch.
+- UL on N3: validate outer IPv4/UDP/2152 and the GTPv1-U T-PDU base header and
+  lengths, then hash the **UL TEID** to select the worker. Manager does not
+  traverse GTP extensions or parse the inner IP/L4 headers; UPF-U does that
+  during normal packet processing.
 - DL on N6: hash destination UE IPv4 to the same worker. The **UL TEID** belongs
   in the map; the worker gets the gNB's **DL TEID** from the installed FAR.
-- The map uses open addressing, is immutable during a run, and has no packet-path
-  lock. Maximum 1024 unique UE/TEID pairs and 32 workers. Duplicate UE IPs or UL
+- Each `session UL_TEID UE_IPV4 NF_INSTANCE_ID` entry populates two separate
+  open-addressed tables: UL TEID → worker and DL UE IP → the same worker.
+  They are immutable during a run and have no packet-path lock.
+  Maximum 1024 unique UE/TEID pairs and 32 workers. Duplicate UE IPs or UL
   TEIDs are rejected. One UL tunnel per UE is supported by this experiment.
 - All workers use **service ID 1**, with distinct explicit **instance IDs**.
   Manager dispatch bypasses ONVM's RSS-based service selection. Mapped IDs are
   reserved against automatic assignment and unrelated NFs.
-- Unmapped/malformed traffic on N3/N6 drops. Other ports retain the ordinary
-  service-chain path. Local ICMP to the UPF endpoint goes to the lowest mapped
+- Unmapped traffic and invalid outer headers on N3/N6 drop in manager. UL inner
+  headers and GTP extensions are left to the worker's existing parser and PDR
+  lookup. Other ports retain the ordinary service-chain path. Local ICMP to the
+  UPF endpoint goes to the lowest mapped
   instance. That local ping does **not** measure full UPF forwarding.
 - Supported data traffic: untagged, unfragmented IPv4 UDP/TCP/ICMP in contiguous
   mbufs, including IPv4 options and GTP extension chains. IPv6, VLAN-tagged
-  input, IP fragments, GTP control messages and segmented mbufs are rejected.
+  input, outer IP fragments, GTP control messages and segmented mbufs are rejected
+  by manager. Inner UL fragments remain outside the supported experiment scope.
   NAT is rejected because N6 destination UE IP is the static dispatch key.
 
 The manager does only ownership classification. The worker still performs PDR
@@ -74,8 +80,10 @@ Build on the existing **Linux DPDK testbed**, using the repository's Meson setup
 ninja -C build
 ```
 
-Rebuild and restart manager and NFs together. Only Meson is supported here;
-the repository's legacy DPDK Makefiles are not maintained by this change.
+Rebuild and restart manager and NFs together. The TEID lookup table changes the
+shared LB memory layout (now `UPF_SW_LB_V2`); do not mix old and new binaries.
+Only Meson is supported here; the repository's legacy DPDK Makefiles are not
+maintained by this change.
 Use the original single-endpoint SMF/UPF-C configuration. Do not use the SR-IOV
 scaling launcher or the worker-specific N3 endpoint allocation workflow.
 
@@ -193,9 +201,11 @@ git diff --check
 
 ASan/UBSan tests compile the real parser/map implementation and production
 manager dispatch/flush and worker coordination bodies, mocking DPDK services.
-They cover IPv4 options, GTP optional/extension chains, UDP/TCP/ICMP affinity,
-all truncation offsets, malformed lengths, duplicate config, random malformed
-packets, batch/full/stopped queues, ARP copy ownership, allocation failure,
+They cover IPv4 options, packets with GTP optional/extensions, TEID-only UL
+selection independent of inner headers, UDP/TCP/ICMP UL/DL affinity,
+both hash tables at capacity, all truncation offsets, malformed outer lengths,
+duplicate config, random malformed packets, batch/full/stopped queues,
+ARP copy ownership, allocation failure,
 MAC validation/caching/static-peer selection and ARP fallback,
 normal ONVM fallback with/without `FLOW_LOOKUP`, all-worker GC ACK and ACK retry,
 and owner-only drain. They do not replace a Linux Meson build, real PFCP session
