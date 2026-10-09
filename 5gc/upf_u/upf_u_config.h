@@ -39,6 +39,9 @@ extern uint16_t g_nat_port_max;      // Inclusive end of dynamic NAT port pool
 
 extern struct rte_ether_addr g_cn_ue_eth;  // Ethernet address for access-facing side of UPF (used when sending to UE)
 extern struct rte_ether_addr g_cn_dn_eth;  // Ethernet address for core-facing side of UPF (used when sending to DN)
+/* Optional fixed next-hop MAC per port (single-peer benchmark topology). */
+extern struct rte_ether_addr g_n3_peer_mac, g_n6_peer_mac;
+extern uint8_t g_n3_peer_mac_set, g_n6_peer_mac_set;
 
 extern char g_log_level[16]; // Log level for UPF-U (e.g., "trace", "debug", "info", "warning", "error")
 

@@ -58,6 +58,7 @@
 #include "upf_u_nat.h"
 #include "upf_u_shaper.h"
 #include "upf_u_trtcm.h"
+#include "upf_u_lb.h"
 
 #define NF_TAG "upf_u"
 
@@ -197,8 +198,12 @@ GetPdrByUeIpAddress(struct rte_mbuf *pkt, uint32_t ue_ip)
 
     key.proto = outer4->next_proto_id;
 
-    if (key.proto == IPPROTO_UDP) {
-        const struct rte_udp_hdr *uh = onvm_pkt_udp_hdr(pkt);
+    if (key.proto == IPPROTO_UDP || key.proto == IPPROTO_TCP) {
+        size_t l4_offset = sizeof(struct rte_ether_hdr) + (outer4->version_ihl & 15) * 4;
+        if ((outer4->version_ihl & 15) < 5 || l4_offset + 4 > rte_pktmbuf_data_len(pkt))
+            return NULL;
+        const struct rte_udp_hdr *uh = rte_pktmbuf_mtod_offset(pkt,
+            const struct rte_udp_hdr *, l4_offset);
         if (uh) {
             sp = rte_be_to_cpu_16(uh->src_port);
             dp = rte_be_to_cpu_16(uh->dst_port);
@@ -248,6 +253,8 @@ GetPdrByTeid(struct rte_mbuf *pkt, const gtp_parse_result_t *gtp_info) {
     if ((inner4->version_ihl >> 4) != 4) return NULL;
 
     uint8_t inner_ihl = (inner4->version_ihl & 0x0F) * 4;
+    if (inner_ihl < sizeof(*inner4) || inner_offset + inner_ihl > data_len)
+        return NULL;
     struct rte_udp_hdr *innerU = rte_pktmbuf_mtod_offset(pkt, struct rte_udp_hdr *,
         inner_offset + inner_ihl);
 
@@ -258,8 +265,11 @@ GetPdrByTeid(struct rte_mbuf *pkt, const gtp_parse_result_t *gtp_info) {
     key.ue_ip     = rte_be_to_cpu_32(inner4->src_addr);
     key.src_ip    = key.ue_ip;
     key.dst_ip    = rte_be_to_cpu_32(inner4->dst_addr);
-    key.src_port  = rte_be_to_cpu_16(innerU->src_port);
-    key.dst_port  = rte_be_to_cpu_16(innerU->dst_port);
+    if (inner4->next_proto_id == IPPROTO_UDP || inner4->next_proto_id == IPPROTO_TCP) {
+        if (inner_offset + inner_ihl + 4 > data_len) return NULL;
+        key.src_port = rte_be_to_cpu_16(innerU->src_port);
+        key.dst_port = rte_be_to_cpu_16(innerU->dst_port);
+    }
     key.proto     = inner4->next_proto_id;
     key.tos_tc    = inner4->type_of_service;
     key.source_if = SRC_IF_ACCESS;
@@ -585,7 +595,7 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta, struct onvm_nf_
         upf_u_shaper_dl_packet_len(pkt, iph, &cal_pktlen);
 
     // Flip to a newly published snapshot if a REQ was received
-    UpfClsMaybeFlipAndAck();
+    if (!upf_u_lb_enabled()) UpfClsMaybeFlipAndAck();
 
     UPDK_PDR *pdr = NULL;
     gtp_parse_result_t gtp_info = {0};
@@ -954,6 +964,11 @@ msg_handler(void *msg_data, struct onvm_nf_local_ctx *nf_local_ctx) {
 
     /* Our NF→NF control path: CP tells us to flip */
     if (e && (uint32_t)e->type == EVT_CLS_GC_REQ) {
+        if (upf_u_lb_enabled()) {
+            /* All workers poll the published slot; leader ACKs after all flip. */
+            rte_free(e);
+            return;
+        }
         g_cls_local.pending_ver = (uint32_t)e->arg0;
         g_cls_local.flip_pending = 1;      // The actual flip happens at burst boundary
 
@@ -972,6 +987,11 @@ msg_handler(void *msg_data, struct onvm_nf_local_ctx *nf_local_ctx) {
     if (e && (uint32_t)e->type == UPF_EVENT_CLEAR_AND_DRAIN) {
         struct onvm_nf *nf = nf_local_ctx->nf;
         int sess_idx = (int)(uintptr_t)e->arg0;
+        if (upf_u_lb_enabled()) {
+            upf_u_lb_relay_drain(sess_idx);
+            rte_free(e);
+            return;
+        }
         if (sess_idx >= 0 && sess_idx < SESS_BUF_MAX_USERS) {
             g_sess_buf[sess_idx].is_buffering = 0;
             uint32_t n = drain_session_batch(sess_idx, UINT32_MAX, nf);
@@ -995,6 +1015,8 @@ callback_handler(struct onvm_nf_local_ctx *nf_local_ctx) {
         return 0;
 
     nf = nf_local_ctx->nf;
+    upf_u_lb_poll(&g_cls_local.ptr, &g_cls_local.ver, nf, drain_session_batch);
+    if (!upf_u_lb_enabled()) UpfClsMaybeFlipAndAck();
     if (unlikely(!last_p)) last_p = rte_get_tsc_cycles();
     cur_p = rte_get_tsc_cycles();
 
@@ -1086,6 +1108,10 @@ main(int argc, char *argv[]) {
     if (upf_u_shaper_init(nf_local_ctx->nf) < 0) {
         rte_exit(EXIT_FAILURE, "Failed to init UPF-U shaper entry pool.\n");
     }
+
+    if (upf_u_lb_init(nf_local_ctx->nf) < 0)
+        rte_exit(EXIT_FAILURE, "Failed to initialize UPF software LB worker\n");
+    upf_u_lb_poll(&g_cls_local.ptr, &g_cls_local.ver, nf_local_ctx->nf, drain_session_batch);
 
     onvm_nflib_run(nf_local_ctx);
 

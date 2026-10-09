@@ -50,6 +50,7 @@
 
 #include "onvm_nf.h"
 #include "onvm_pkt.h"
+#include "onvm_upf_lb.h"
 
 /**********************************Interfaces*********************************/
 
@@ -57,8 +58,6 @@ void
 onvm_pkt_process_rx_batch(struct queue_mgr *rx_mgr, struct rte_mbuf *pkts[], uint16_t rx_count) {
         uint16_t i;
         struct onvm_pkt_meta *meta;
-	struct rte_ether_hdr *eth_hdr;
-	uint16_t ether_type;
 #ifdef FLOW_LOOKUP
         struct onvm_flow_entry *flow_entry;
         struct onvm_service_chain *sc;
@@ -69,6 +68,8 @@ onvm_pkt_process_rx_batch(struct queue_mgr *rx_mgr, struct rte_mbuf *pkts[], uin
                 return;
 
         for (i = 0; i < rx_count; i++) {
+                if (onvm_upf_lb && onvm_upf_lb_dispatch(rx_mgr, pkts[i]))
+                        continue;
                 meta = onvm_get_pkt_meta(pkts[i], onvm_config->dynfield_offset);
                 meta->src = 0;
                 meta->chain_index = 0;

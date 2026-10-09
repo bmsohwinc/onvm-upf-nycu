@@ -498,7 +498,7 @@ static inline int parse_gtpu_once(struct rte_mbuf *pkt, gtp_parse_result_t *resu
                     result->qfi = raw[2] & 0x3F;
 
                     result->gtp_hdr_len += ext_len;
-                    next_type = psc->next_hdr;
+                    next_type = raw[ext_len - 1];
                     ext_offset += ext_len;
                 } else {
                     // Unknown extension - skip by length

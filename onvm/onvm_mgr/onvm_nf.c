@@ -48,6 +48,7 @@
 
 #include "onvm_nf.h"
 #include "onvm_mgr.h"
+#include "onvm_upf_lb.h"
 #include "onvm_stats.h"
 #include <rte_lpm.h>
 
@@ -153,7 +154,7 @@ onvm_nf_next_instance_id(void) {
                 instance_id = next_instance_id++;
                 /* Check if this id is occupied by another NF */
                 nf = &nfs[instance_id];
-                if (!onvm_nf_is_valid(nf))
+                if ((!onvm_upf_lb || !onvm_upf_lb->workers[instance_id]) && !onvm_nf_is_valid(nf))
                         return instance_id;
         }
 
@@ -165,7 +166,7 @@ onvm_nf_next_instance_id(void) {
                 instance_id = next_instance_id++;
                 /* Check if this id is occupied by another NF */
                 nf = &nfs[instance_id];
-                if (!onvm_nf_is_valid(nf))
+                if ((!onvm_upf_lb || !onvm_upf_lb->workers[instance_id]) && !onvm_nf_is_valid(nf))
                         return instance_id;
         }
 
@@ -265,11 +266,20 @@ onvm_nf_start(struct onvm_nf_init_cfg *nf_init_cfg) {
         // if NF passed its own id on the command line, don't assign here
         // assume user is smart enough to avoid duplicates
         nf_id = nf_init_cfg->instance_id == (uint16_t)NF_NO_ID ? onvm_nf_next_instance_id() : nf_init_cfg->instance_id;
-        spawned_nf = &nfs[nf_id];
-
         if (nf_id >= MAX_NFS) {
                 // There are no more available IDs for this NF
                 nf_init_cfg->status = NF_NO_IDS;
+                return 1;
+        }
+        spawned_nf = &nfs[nf_id];
+
+        /* Static UPF IDs are reserved, and may be started once per deployment.
+         * Validate here, avoiding tag lookups in the packet path. */
+        if (onvm_upf_lb && onvm_upf_lb->workers[nf_id] &&
+            (nf_init_cfg->service_id != 1 || !nf_init_cfg->tag ||
+             strcmp(nf_init_cfg->tag, "upf_u") ||
+             __atomic_load_n(&onvm_upf_lb->state[nf_id].started, __ATOMIC_ACQUIRE))) {
+                nf_init_cfg->status = NF_ID_CONFLICT;
                 return 1;
         }
 
@@ -285,7 +295,7 @@ onvm_nf_start(struct onvm_nf_init_cfg *nf_init_cfg) {
                 return 1;
         }
 
-        if (onvm_nf_is_valid(spawned_nf)) {
+        if (onvm_nf_is_valid(spawned_nf) || spawned_nf->status == NF_STARTING) {
                 // This NF is trying to declare an ID already in use
                 nf_init_cfg->status = NF_ID_CONFLICT;
                 return 1;
@@ -510,7 +520,7 @@ onvm_nf_init_rings(struct onvm_nf *nf) {
         tq_name = get_tx_queue_name(instance_id);
         msg_q_name = get_msg_queue_name(instance_id);
 
-        nf->rx_q = rte_ring_create(rq_name, ringsize, socket_id, RING_F_SC_DEQ); /* multi prod, single cons */
+        nf->rx_q = rte_ring_create(rq_name, NF_RX_QUEUE_RINGSIZE, socket_id, RING_F_SC_DEQ); /* multi prod, single cons */
         if (nf->rx_q == NULL)
                 rte_exit(EXIT_FAILURE, "Cannot create rx ring queue for NF %u\n", instance_id);
 

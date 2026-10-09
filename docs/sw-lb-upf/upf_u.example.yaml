@@ -1,0 +1,18 @@
+info:
+  version: 1.0.0
+  description: Software dispatch baseline; same configuration for every worker
+configuration:
+  log_level: warning
+  dataplane:
+    upf_n3_ip: "10.10.2.11"
+    upf_n6_ip: "10.10.3.11"
+    ports:
+      n3_port: 0
+      n6_port: 1
+    # Optional: set actual peer NIC MACs when the generator/sink cannot answer ARP.
+    # Each setting fixes the destination MAC for ALL traffic leaving that port;
+    # use only with one peer/next hop per port. Omit for dynamic ARP.
+    # n3_peer_mac: "02:00:00:04:00:01"
+    # n6_peer_mac: "02:00:00:05:00:01"
+  nat:
+    enable: false

@@ -73,6 +73,7 @@
 
 #define NUM_MBUFS 32767          // total number of mbufs (2^15 - 1)
 #define NF_QUEUE_RINGSIZE 65536  // size of queue for NFs
+#define NF_RX_QUEUE_RINGSIZE 4096 // match the SR-IOV experiment (4095 usable)
 
 #define PACKET_READ_SIZE ((uint16_t)32)
 

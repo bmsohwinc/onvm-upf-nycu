@@ -1,7 +1,8 @@
 upf_sources = files(
   'upf.c',
   'upf_context.c',
-  'upf_sess_buf.c'
+  'upf_sess_buf.c',
+  'upf_sw_lb.c'
 )
 
 # Include directories

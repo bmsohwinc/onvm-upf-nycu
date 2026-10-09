@@ -17,6 +17,10 @@ unsigned int reportCaller = 0;
  * Default = most verbose to preserve historical behavior until UTLT_SetLogLevel is called. */
 static int g_utlt_min_level = LOG_TRACE;
 
+int UTLT_LogEnabled(int level) {
+    return level <= __atomic_load_n(&g_utlt_min_level, __ATOMIC_ACQUIRE);
+}
+
 static inline int
 utlt_parse_level(const char *level) {
     if (level == NULL) return -1;

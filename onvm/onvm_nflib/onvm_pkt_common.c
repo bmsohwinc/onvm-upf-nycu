@@ -156,8 +156,16 @@ onvm_pkt_flush_nf_queue(struct queue_mgr *tx_mgr, uint16_t nf_id, struct onvm_nf
         nf = &nfs[nf_id];
 
         // Ensure destination NF is running and ready to receive packets
-        if (!onvm_nf_is_valid(nf))
+        if (!onvm_nf_is_valid(nf) || nf->rx_q == NULL) {
+                /* A worker may stop after enqueue and before the batch flush. */
+                for (i = 0; i < nf_buf->count; i++)
+                        onvm_pkt_drop(nf_buf->buffer[i]);
+                nf->stats.rx_drop += nf_buf->count;
+                if (source_nf != NULL)
+                        source_nf->stats.tx_drop += nf_buf->count;
+                nf_buf->count = 0;
                 return;
+        }
 
         if (rte_ring_enqueue_bulk(nf->rx_q, (void **)nf_buf->buffer, nf_buf->count, NULL) == 0) {
                 for (i = 0; i < nf_buf->count; i++) {

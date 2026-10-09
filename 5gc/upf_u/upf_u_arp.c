@@ -24,6 +24,7 @@
 #include "upf_u_arp.h"
 #include "upf_u_config.h"
 #include "upf_u_helper.h"
+#include "upf_u_lb.h"
 #include "utlt_debug.h"
 
 #define PKTMBUF_POOL_NAME "MProc_pktmbuf_pool"
@@ -39,6 +40,15 @@ static struct neigh_entry neigh_tbl[NEIGH_MAX];
 
 /* ARP Reply mbuf pool */
 static struct rte_mempool *g_pktmbuf_pool = NULL;
+
+/* Workers use manager-owned ports. MACs are copied once at startup. */
+static int
+cached_mac(uint16_t port, struct rte_ether_addr *mac) {
+    if (port == g_n3_port) *mac = g_cn_ue_eth;
+    else if (port == g_n6_port) *mac = g_cn_dn_eth;
+    else return -1;
+    return 0;
+}
 
 /* Check if the given IP is one of our local IPs on the specified port */
 static int
@@ -164,7 +174,7 @@ send_arp_request(uint16_t port,
         }
     }
 
-    if (rte_eth_macaddr_get(port, &src_mac) < 0) {
+    if (cached_mac(port, &src_mac) < 0) {
         UTLT_Error("Failed to get MAC for port %u", port);
         return -1;
     }
@@ -303,6 +313,11 @@ handle_arp_packet(struct rte_mbuf *pkt,
 
     switch (op) {
     case RTE_ARP_OP_REQUEST: {
+        /* Every worker learns; only one replies for our shared IP/MAC. */
+        if (!upf_u_lb_arp_responder()) {
+            meta->action = ONVM_NF_ACTION_DROP;
+            return 0;
+        }
         if (!is_local_ip_on_port(port, target_ip_be)) {
             UTLT_Debug("handle_arp_packet: ARP request not for local IP, port=%u target_ip=%s",
                port, convertToIpAddressString(target_ip_be));
@@ -310,7 +325,7 @@ handle_arp_packet(struct rte_mbuf *pkt,
             return 0;
         }
 
-        if (rte_eth_macaddr_get(port, &local_mac) < 0) {
+        if (cached_mac(port, &local_mac) < 0) {
             UTLT_Error("handle_arp_packet: failed to get local MAC for port=%u", port);
             meta->action = ONVM_NF_ACTION_DROP;
             return 0;
@@ -373,14 +388,14 @@ handle_arp_packet(struct rte_mbuf *pkt,
             char sip_buf[16], tip_buf[16];
             UTLT_Warning("handle_arp_packet: failed to send ARP reply on port=%u rc=%d sip=%s tip=%s",
                         port, rc,
-                        ipv4_to_buf(out_arp->arp_data.arp_sip, sip_buf),
-                        ipv4_to_buf(out_arp->arp_data.arp_tip, tip_buf));
+                        ipv4_to_buf(target_ip_be, sip_buf),
+                        ipv4_to_buf(sender_ip_be, tip_buf));
         } else {
             char sip_buf[16], tip_buf[16];
             UTLT_Trace("handle_arp_packet: sent ARP reply on port=%u sip=%s tip=%s",
                         port,
-                        ipv4_to_buf(out_arp->arp_data.arp_sip, sip_buf),
-                        ipv4_to_buf(out_arp->arp_data.arp_tip, tip_buf));
+                        ipv4_to_buf(target_ip_be, sip_buf),
+                        ipv4_to_buf(sender_ip_be, tip_buf));
         }
 
         // This ARP Request packet is consumed by us, no need to pass to other NFs
@@ -410,10 +425,16 @@ attach_l2_or_arp(struct rte_mbuf *pkt,
     struct neigh_entry *ne;
     struct rte_ether_addr local_mac;
 
-    ne = neigh_lookup(out_port, next_hop_ip_be);
-    if (ne == NULL || ne->state != NEIGH_REACHABLE) {
-        (void)send_arp_request(out_port, local_ip_be, next_hop_ip_be, nf);
-        return -1;
+    const struct rte_ether_addr *dst_mac;
+    if (out_port == g_n3_port && g_n3_peer_mac_set) dst_mac = &g_n3_peer_mac;
+    else if (out_port == g_n6_port && g_n6_peer_mac_set) dst_mac = &g_n6_peer_mac;
+    else {
+        ne = neigh_lookup(out_port, next_hop_ip_be);
+        if (ne == NULL || ne->state != NEIGH_REACHABLE) {
+            (void)send_arp_request(out_port, local_ip_be, next_hop_ip_be, nf);
+            return -1;
+        }
+        dst_mac = &ne->mac;
     }
 
     eth_hdr = (struct rte_ether_hdr *)
@@ -421,11 +442,11 @@ attach_l2_or_arp(struct rte_mbuf *pkt,
     if (eth_hdr == NULL)
         return -1;
 
-    if (rte_eth_macaddr_get(out_port, &local_mac) < 0)
+    if (cached_mac(out_port, &local_mac) < 0)
         return -1;
 
     rte_ether_addr_copy(&local_mac, &eth_hdr->src_addr);
-    rte_ether_addr_copy(&ne->mac, &eth_hdr->dst_addr);
+    rte_ether_addr_copy(dst_mac, &eth_hdr->dst_addr);
     eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
 
     return 0;

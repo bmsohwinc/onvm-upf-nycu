@@ -21,12 +21,16 @@
 #include <string.h>
 #include <ctype.h>
 #include <yaml.h>
+#include <rte_memzone.h>
+#include "onvm_common.h"
 
 #include "upf_u_config.h"
 #include "utlt_debug.h"
 
 struct rte_ether_addr g_cn_ue_eth;
 struct rte_ether_addr g_cn_dn_eth;
+struct rte_ether_addr g_n3_peer_mac, g_n6_peer_mac;
+uint8_t g_n3_peer_mac_set, g_n6_peer_mac_set;
 
 uint16_t g_n3_port = 0;
 uint16_t g_n6_port   = 0;
@@ -46,9 +50,13 @@ char g_log_level[16] = "warning";
 
 static int
 parse_mac(const char *input_string, uint8_t out_mac_addr[6]) {
-    int v[6];
-    if (sscanf(input_string, " %x:%x:%x:%x:%x:%x ", &v[0],&v[1],&v[2],&v[3],&v[4],&v[5]) != 6) return -1;
-    for (int i = 0; i < 6; i++) out_mac_addr[i] = (uint8_t)v[i];
+    unsigned v[6], nonzero = 0;
+    int consumed = 0;
+    if (sscanf(input_string, "%2x:%2x:%2x:%2x:%2x:%2x%n",
+               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &consumed) != 6 ||
+        input_string[consumed] || (v[0] & 1)) return -1;
+    for (int i = 0; i < 6; i++) { out_mac_addr[i] = (uint8_t)v[i]; nonzero |= v[i]; }
+    if (!nonzero) return -1;
     return 0;
 }
 
@@ -206,6 +214,20 @@ do_parse(yaml_document_t *doc) {
         }
     }
 
+    const char *mac_keys[] = {"n3_peer_mac", "n6_peer_mac"};
+    struct rte_ether_addr *macs[] = {&g_n3_peer_mac, &g_n6_peer_mac};
+    uint8_t *mac_set[] = {&g_n3_peer_mac_set, &g_n6_peer_mac_set};
+    for (unsigned i = 0; i < 2; i++) {
+        yaml_node_t *node = map_get(doc, dp, mac_keys[i]);
+        if (!node) continue;
+        const char *value = scalar_str(node);
+        if (!value || parse_mac(value, macs[i]->addr_bytes)) {
+            fprintf(stderr, "[UPF-U][CONFIG] invalid dataplane.%s (requires unicast MAC)\n", mac_keys[i]);
+            return -1;
+        }
+        *mac_set[i] = 1;
+    }
+
     yaml_node_t *nat = map_get(doc, cfg, "nat");
 
     if (nat && nat->type == YAML_MAPPING_NODE) {
@@ -348,19 +370,13 @@ UpfU_LoadAndParseConfig(const char *path) {
 
 void
 init_l2_addrs(void) {
-    int ret;
-
-    ret = rte_eth_macaddr_get(g_n3_port, &g_cn_ue_eth);
-    if (ret < 0) {
-        rte_exit(EXIT_FAILURE,
-                 "Cannot get MAC address: err=%d, port=%" PRIu16 "\n",
-                 ret, g_n3_port);
-    }
-
-    ret = rte_eth_macaddr_get(g_n6_port, &g_cn_dn_eth);
-    if (ret < 0) {
-        rte_exit(EXIT_FAILURE,
-                 "Cannot get MAC address: err=%d, port=%" PRIu16 "\n",
-                 ret, g_n6_port);
-    }
+    const struct rte_memzone *mz = rte_memzone_lookup(MZ_PORT_INFO);
+    if (!mz || mz->len < sizeof(struct port_info))
+        rte_exit(EXIT_FAILURE, "Cannot get manager port information\n");
+    const struct port_info *info = mz->addr;
+    if (g_n3_port >= RTE_MAX_ETHPORTS || g_n6_port >= RTE_MAX_ETHPORTS ||
+        !info->init[g_n3_port] || !info->init[g_n6_port])
+        rte_exit(EXIT_FAILURE, "UPF N3/N6 ports are not initialized\n");
+    g_cn_ue_eth = info->mac[g_n3_port];
+    g_cn_dn_eth = info->mac[g_n6_port];
 }

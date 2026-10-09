@@ -48,6 +48,7 @@
 ******************************************************************************/
 
 #include "onvm_mgr/onvm_init.h"
+#include "onvm_upf_lb.h"
 
 #include "upf/upf_context.h"
 
@@ -197,7 +198,7 @@ init(int argc, char *argv[]) {
         nf_per_service_count = mz_nf_per_service->addr;
 
         /* set up custom flags */
-        mz_onvm_config = rte_memzone_reserve(MZ_ONVM_CONFIG, sizeof(uint16_t), rte_socket_id(), NO_FLAGS);
+        mz_onvm_config = rte_memzone_reserve(MZ_ONVM_CONFIG, sizeof(*onvm_config), rte_socket_id(), NO_FLAGS);
         if (mz_onvm_config == NULL) {
                 rte_exit(EXIT_FAILURE, "Cannot reserve memory zone for ONVM custom flags.\n");
         }
@@ -278,6 +279,7 @@ init(int argc, char *argv[]) {
 
         onvm_flow_dir_init();
 
+        onvm_upf_lb_init();
         UpfSessionPoolInit();
         UeIpToUpfSessionMapInit();
         TeidToUpfSessionMapInit();

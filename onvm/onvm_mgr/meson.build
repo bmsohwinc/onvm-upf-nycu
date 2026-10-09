@@ -4,6 +4,7 @@ sources = files(
     'onvm_init.c',
     'onvm_nf.c',
     'onvm_pkt.c',
+    'onvm_upf_lb.c',
     'onvm_stats.c'
 )
 

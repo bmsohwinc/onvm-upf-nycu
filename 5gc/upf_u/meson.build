@@ -1,5 +1,6 @@
 sources = files(
     'upf_u.c',
+    'upf_u_lb.c',
     'upf_u_config.c',
     'upf_u_arp.c',
     'upf_u_icmp.c',

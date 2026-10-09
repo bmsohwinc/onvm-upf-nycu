@@ -13,6 +13,7 @@ typedef int Status;
 #define STATUS_EAGAIN 1
 
 Status UTLT_SetLogLevel(const char *level);
+int UTLT_LogEnabled(int level);
 Status UTLT_SetReportCaller(unsigned int reportCaller);
 
 const char *UTLT_StrStatus(Status status);
@@ -52,7 +53,8 @@ enum ReportCaller {
 #define UTLT_Debug(fmt, ...) \
     UTLT_LogPrint(LOG_DEBUG, __FILENAME__, __LINE__, __func__, fmt, ## __VA_ARGS__)
 #define UTLT_Trace(fmt, ...) \
-    UTLT_LogPrint(LOG_TRACE, __FILENAME__, __LINE__, __func__, fmt, ## __VA_ARGS__)
+    (UTLT_LogEnabled(LOG_TRACE) ? \
+     UTLT_LogPrint(LOG_TRACE, __FILENAME__, __LINE__, __func__, fmt, ## __VA_ARGS__) : STATUS_OK)
 
 #define UTLT_Assert(cond, expr, fmt, ...) \
     if (!(cond)) { \

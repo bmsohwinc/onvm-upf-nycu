@@ -49,6 +49,7 @@
 
 #include "onvm_mgr/onvm_args.h"
 #include "onvm_mgr/onvm_stats.h"
+#include "onvm_upf_lb.h"
 
 /******************************Global variables*******************************/
 
@@ -130,12 +131,17 @@ parse_app_args(uint8_t max_ports, int argc, char *argv[]) {
             {"stats-out", no_argument, NULL, 's'},       {"stats-sleep-time", no_argument, NULL, 'z'},
             {"time_to_live", no_argument, NULL, 't'},    {"packet_limit", no_argument, NULL, 'l'},
             {"verbocity-level", no_argument, NULL, 'v'}, {"enable_shared_cpu", no_argument, NULL, 'c'},
-            {"jumbo_frames", no_argument, NULL, 'j'}};
+            {"jumbo_frames", no_argument, NULL, 'j'},
+            {"upf-lb", required_argument, NULL, 256},
+            {NULL, 0, NULL, 0}};
 
         progname = argv[0];
 
         while ((opt = getopt_long(argc, argvopt, "p:r:n:d:s:t:l:z:v:cj", lgopts, &option_index)) != EOF) {
                 switch (opt) {
+                        case 256:
+                                onvm_upf_lb_path = optarg;
+                                break;
                         case 'p':
                                 if (parse_portmask(max_ports, optarg) != 0) {
                                         usage();
@@ -224,7 +230,8 @@ usage(void) {
             "\t-l PACKET_LIMIT: how many millions of packets to recieve before exiting (optional)\n"
             "\t-v VERBOCITY_LEVEL: verbocity level of the stats output (optional)\n"
             "\t-c ENABLE_SHARED_CORE: allow the NFs to share a core based on mutex sleep/wakeups (optional)\n"
-            "\t-j JUMBO_FRAMES: allow the ports to send and receive jumbo frames (optional)\n",
+            "\t-j JUMBO_FRAMES: allow the ports to send and receive jumbo frames (optional)\n"
+            "\t--upf-lb FILE: static TEID/UE-IP to UPF instance map (optional)\n",
             progname);
 }
 
