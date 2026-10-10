@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ASan/UBSan checks of classification, L2, dispatch and worker coordination.
+"""ASan/UBSan checks of port setup, classification, L2 and worker coordination.
 
 Compile production function bodies with mocked DPDK/ONVM services. These are
 local logic/ownership checks, not a Linux build or an end-to-end UPF test.
@@ -24,7 +24,7 @@ def body(path):
 
 
 def function(code, name):
-    match = re.search(r"(?:static )?(?:void|int)\n" + name + r"\(.*?\n\}", code, re.S)
+    match = re.search(r"(?:static )?(?:void|int)\n" + name + r"\([^;]*?\) \{.*?\n\}", code, re.S)
     assert match, name
     return match.group(0)
 
@@ -37,6 +37,14 @@ with tempfile.TemporaryDirectory(prefix="upf-sw-lb-") as tmp:
     ], check=True)
     subprocess.run([binary], check=True)
     tmp = Path(tmp)
+    init = body("onvm/onvm_mgr/onvm_init.c")
+    port_conf = re.search(r"static const struct rte_eth_conf port_conf = \{.*?\n\};", init, re.S)
+    assert port_conf
+    port_source = (HERE / "test_port_init.c").read_text().replace(
+        "/* SOURCE_UNDER_TEST */", port_conf.group(0) + "\n" + function(init, "init_port"))
+    (tmp / "test_port_init.c").write_text(port_source)
+    subprocess.run(FLAGS + [str(tmp / "test_port_init.c"), "-o", str(tmp / "test_port_init")], check=True)
+    subprocess.run([str(tmp / "test_port_init")], check=True)
     l2_source = (HERE / "test_l2.c").read_text().replace(
         "/* SOURCE_UNDER_TEST */",
         function(body("5gc/upf_u/upf_u_config.c"), "parse_mac") + "\n" +

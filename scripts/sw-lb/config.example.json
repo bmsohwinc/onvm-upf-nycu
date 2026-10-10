@@ -1,0 +1,23 @@
+{
+  "core_repo": "${LAB_HOME}/L25GC-plus",
+  "nf_bin": "${LAB_HOME}/L25GC-plus/bin-sriov",
+  "nf_config_dir": "${LAB_HOME}/L25GC-plus/onvm_nf_configs",
+  "upfc_config": "${UPF_REPO}/5gc/upf_c/config/upfcfg.yaml",
+  "results_root": "/dev/shm/upf-experiments",
+  "n3_pci": "0000:06:10.0",
+  "n6_pci": "0000:06:10.1",
+  "n3_ip": "10.10.2.11",
+  "n6_ip": "10.10.3.11",
+  "n3_peer_mac": "02:00:00:04:00:01",
+  "n6_peer_mac": "90:e2:ba:b3:ba:99",
+  "workers": [
+    {"instance": 14, "core": 3},
+    {"instance": 15, "core": 4},
+    {"instance": 16, "core": 5},
+    {"instance": 17, "core": 6}
+  ],
+  "control_cores": {
+    "nrf": 10, "udr": 12, "udm": 14, "ausf": 16, "nssf": 15,
+    "pcf": 13, "chf": 17, "amf": 11, "smf": 8
+  }
+}

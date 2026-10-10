@@ -120,7 +120,8 @@ check_all_ports_link_status(uint8_t port_num, uint32_t port_mask);
 static const struct rte_eth_conf port_conf = {
     .rxmode = {
             .mq_mode = RTE_ETH_MQ_RX_RSS,
-            .mtu = RTE_ETHER_MAX_LEN,
+            /* MTU excludes the Ethernet header and FCS; the PMD adds them. */
+            .mtu = RTE_ETHER_MTU,
             .offloads = RTE_ETH_RX_OFFLOAD_CHECKSUM,
         },
     .rx_adv_conf = {
@@ -172,6 +173,7 @@ init(int argc, char *argv[]) {
         if (mz_port == NULL)
                 rte_exit(EXIT_FAILURE, "Cannot reserve memory zone for port information\n");
         ports = mz_port->addr;
+        memset(ports, 0, sizeof(*ports));
 
         /* set up core status */
         mz_cores = rte_memzone_reserve(MZ_CORES_STATUS, sizeof(*cores) * onvm_threading_get_num_cores(),
@@ -373,11 +375,15 @@ init_port(uint8_t port_num) {
         struct rte_eth_txconf txq_conf;
         struct rte_eth_dev_info dev_info;
         struct rte_eth_conf local_port_conf = port_conf;
+        char dev_name[RTE_ETH_NAME_MAX_LEN];
 
         uint16_t q;
         int retval;
 
-        printf("Port %u init ... \n", (unsigned)port_num);
+        retval = rte_eth_dev_get_name_by_port(port_num, dev_name);
+        if (retval != 0)
+                return retval;
+        printf("Port %u (%s): manager I/O\n", port_num, dev_name);
         printf("Port %u socket id %u ... \n", (unsigned)port_num, (unsigned)rte_eth_dev_socket_id(port_num));
         printf("Port %u Rx rings %u ... \n", (unsigned)port_num, (unsigned)rx_rings);
         printf("Port %u Tx rings %u ... \n", (unsigned)port_num, (unsigned)tx_rings);
@@ -385,21 +391,35 @@ init_port(uint8_t port_num) {
 
         /* Standard DPDK port initialisation - config port, then set up
          * rx and tx rings */
-        rte_eth_dev_info_get(port_num, &dev_info);
+        retval = rte_eth_dev_info_get(port_num, &dev_info);
+        if (retval != 0)
+                return retval;
+        if (rx_rings > dev_info.max_rx_queues || tx_rings > dev_info.max_tx_queues) {
+                fprintf(stderr, "Port %u supports at most %u RX/%u TX queues; manager requests %u/%u\n",
+                        port_num, dev_info.max_rx_queues, dev_info.max_tx_queues, rx_rings, tx_rings);
+                return -EINVAL;
+        }
+        /* Match the working SR-IOV branch's VF-capability handling. */
+        local_port_conf.rxmode.offloads &= dev_info.rx_offload_capa;
+        local_port_conf.txmode.offloads &= dev_info.tx_offload_capa;
         if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
                 local_port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
         local_port_conf.rx_adv_conf.rss_conf.rss_hf &= dev_info.flow_type_rss_offloads;
-        if (local_port_conf.rx_adv_conf.rss_conf.rss_hf != port_conf.rx_adv_conf.rss_conf.rss_hf) {
-                printf(
-                    "Port %u modified RSS hash function based on hardware support,"
-                    "requested:%#" PRIx64 " configured:%#" PRIx64 "\n",
-                    port_num, port_conf.rx_adv_conf.rss_conf.rss_hf, local_port_conf.rx_adv_conf.rss_conf.rss_hf);
+        if (rx_rings == 1 || local_port_conf.rx_adv_conf.rss_conf.rss_hf == 0) {
+                local_port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_NONE;
+                memset(&local_port_conf.rx_adv_conf.rss_conf, 0, sizeof(local_port_conf.rx_adv_conf.rss_conf));
+        } else {
+                local_port_conf.rx_adv_conf.rss_conf.rss_key_len = dev_info.hash_key_size;
         }
-        local_port_conf.rx_adv_conf.rss_conf.rss_key_len = dev_info.hash_key_size;
 
         if (ONVM_USE_JUMBO_FRAMES) {
                 local_port_conf.rxmode.mtu = MAX_MTU;
         }
+
+        printf("Port %u config: driver=%s MTU=%u RSS=%s rx_offloads=%#" PRIx64 " tx_offloads=%#" PRIx64 "\n",
+               port_num, dev_info.driver_name, local_port_conf.rxmode.mtu,
+               local_port_conf.rxmode.mq_mode == RTE_ETH_MQ_RX_NONE ? "off" : "on",
+               local_port_conf.rxmode.offloads, local_port_conf.txmode.offloads);
 
         if ((retval = rte_eth_dev_configure(port_num, rx_rings, tx_rings, &local_port_conf)) != 0)
                 return retval;
@@ -421,14 +441,16 @@ init_port(uint8_t port_num) {
         }
 
         txq_conf = dev_info.default_txconf;
-        txq_conf.offloads = port_conf.txmode.offloads;
+        txq_conf.offloads = local_port_conf.txmode.offloads;
         for (q = 0; q < tx_rings; q++) {
                 retval = rte_eth_tx_queue_setup(port_num, q, tx_ring_size, rte_eth_dev_socket_id(port_num), &txq_conf);
                 if (retval < 0)
                         return retval;
         }
 
-        rte_eth_promiscuous_enable(port_num);
+        retval = rte_eth_promiscuous_enable(port_num);
+        if (retval != 0)
+                fprintf(stderr, "Port %u promiscuous enable failed: %d\n", port_num, retval);
 
         retval = rte_eth_dev_start(port_num);
         if (retval < 0)

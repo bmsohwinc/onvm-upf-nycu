@@ -85,6 +85,11 @@ and deletion behavior is outside this static baseline.
 
 ## Build and run
 
+For one-command CN startup, use the [software-LB launcher](../../scripts/sw-lb/README.md).
+It creates matching run-local configs and starts manager, UPF-C, explicit workers
+and control NFs, with per-process tmux windows/logs. The manual commands below
+remain useful for individual components.
+
 Build on the existing **Linux DPDK testbed**, using the repository's Meson setup:
 
 ```bash
@@ -124,6 +129,14 @@ Here `-p 3` enables ports 0/1. The first `-n 4` is EAL memory channels; the
 second `-n 0xFFFF8` is ONVM's allowed NF core mask. Packet learning requires the
 default single manager RX thread. Keep thread/core counts identical across comparisons.
 The wrapper `scripts/start.sh` does not forward `--upf-lb`; use the binary.
+
+Port initialization uses the same VF capability handling as the working SR-IOV
+branch: disable RSS for a single RX queue (or no supported RSS hashes), restrict
+offloads to device capabilities, use matching port/TX-queue offloads, and set a
+1500-byte IP MTU. Startup logs each port's PCI address, driver, queue counts,
+RSS mode and offloads; a failed promiscuous-mode request is reported. These
+settings remove an initialization difference between baselines; they do not
+establish the cause of a remote zero-RX failure without a testbed rerun.
 
 4. Start the original control NFs as usual, and start the four workers below
    in separate terminals. Reserve core 7 for UPF-C and avoid overlapping the
@@ -233,7 +246,9 @@ git diff --check
 
 ASan/UBSan tests compile the real parser/map implementation and production
 manager dispatch/flush and worker coordination bodies, mocking DPDK services.
-They cover first-packet learning with IPv4 options and GTP optional/extensions,
+They cover production port setup with single-queue/no-capability RSS handling,
+offload capability limits, matching queue configuration and startup failures;
+first-packet learning with IPv4 options and GTP optional/extensions,
 round-robin wraparound/counts, UL-first and DL-first affinity, TEID-only warm UL
 selection independent of inner headers, both hash tables at capacity,
 all truncation offsets, malformed discovery packets, duplicate worker config,
