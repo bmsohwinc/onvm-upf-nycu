@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Shared-port software-LB CN launcher. Requires Python 3.8+, PyYAML and tmux."""
 import argparse
+import csv
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import pwd
@@ -17,6 +19,7 @@ REPO = Path(__file__).resolve().parents[2]
 SOCKET = "upf-sw-lb"
 NFS = ("nrf", "udr", "udm", "ausf", "nssf", "pcf", "chf", "amf", "smf")
 MASK = "0xFFFF8"
+QCHECK_DEFAULTS = {"monitor_core": 19, "queue_interval_s": 0.2, "queue_threshold": 40}
 
 
 def expand(value, home):
@@ -37,7 +40,12 @@ def prepare(config, directory):
     """Validate every input and build run-local configs/commands without writes."""
     import yaml
 
-    c = config
+    c = {**QCHECK_DEFAULTS, **config}
+    interval = c["queue_interval_s"]
+    if type(interval) not in (int, float) or not math.isfinite(interval) or interval <= 0:
+        raise ValueError("queue_interval_s must be positive and finite")
+    if type(c["queue_threshold"]) is not int or c["queue_threshold"] <= 0:
+        raise ValueError("queue_threshold must be a positive integer")
     for key in ("core_repo", "nf_bin", "nf_config_dir", "upfc_config", "results_root"):
         if not Path(c[key]).is_absolute():
             raise ValueError(f"{key} must be an absolute path (or use ${{LAB_HOME}} / ${{UPF_REPO}})")
@@ -98,9 +106,9 @@ def prepare(config, directory):
     allow = ["-a", pci[0], "-a", pci[1]]
     jobs = []
 
-    def job(name, argv, cwd, env=None, identity=None):
+    def job(name, argv, cwd, env=None, identity=None, stdout=None):
         jobs.append(dict(name=name, argv=list(map(str, argv)), cwd=str(cwd),
-                         env=env or {}, identity=identity))
+                         env=env or {}, identity=identity, stdout=stdout))
 
     job("manager", [REPO / "build/onvm/onvm_mgr/onvm_mgr", "-l", "0-2", "-n", "4",
                     "--proc-type=primary", "--file-prefix=rte", "--base-virtaddr=0x7f000000000",
@@ -132,15 +140,24 @@ def prepare(config, directory):
         files[f"nf/{nf}.json"] = json.dumps(data, indent=2) + "\n"
         job(nf, ["taskset", "-c", core, Path(c["nf_bin"]) / nf], core_repo,
             dict(env, NF_NAME=nf), [iid, sid, core])
+    if type(c["monitor_core"]) is not int or c["monitor_core"] < 0 or c["monitor_core"] in cores:
+        raise ValueError("monitor_core must be a nonnegative integer on a separate core from manager and NFs")
     for path in [Path(j["argv"][0]) for j in jobs if j["name"] not in NFS] + [Path(c["nf_bin"]) / nf for nf in NFS]:
         if not path.is_file() or not os.access(path, os.X_OK):
             raise ValueError(f"missing/non-executable binary: {path}; build the UPF targets or correct nf_bin for control NFs")
+    qcheck = REPO / "scripts/qcheck.py"
+    if not qcheck.is_file():
+        raise ValueError(f"missing queue monitor: {qcheck}")
+    job("qcheck", ["taskset", "-c", c["monitor_core"], sys.executable, qcheck,
+                   *[w["instance"] for w in workers], "--ports", "0", "1",
+                   "--interval", c["queue_interval_s"], "--watch", "--threshold", c["queue_threshold"]],
+        REPO, stdout="queues.csv")
     return files, jobs
 
 
 class Launcher:
     def __init__(self, config, run):
-        self.config = config
+        self.config = {**QCHECK_DEFAULTS, **config}
         self.directory = Path(config["results_root"]) / run / "cn"
         self.session = "sw-lb-" + run
 
@@ -168,8 +185,9 @@ class Launcher:
         script = self.directory / f"{name}.sh"
         gate = self.directory / f"{name}.go"
         argv = ["env", *[f"{k}={v}" for k, v in job["env"].items()], *job["argv"]]
+        redirect = " > " + shlex.quote(str(self.directory / job["stdout"])) if job.get("stdout") else ""
         script.write_text("#!/bin/bash\nset -euo pipefail\nwhile [[ ! -e " + shlex.quote(str(gate)) +
-                          " ]]; do sleep 0.05; done\ncd " + shlex.quote(job["cwd"]) + "\nexec " + quote(argv) + "\n")
+                          " ]]; do sleep 0.05; done\ncd " + shlex.quote(job["cwd"]) + "\nexec " + quote(argv) + redirect + "\n")
         pane = self.tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", self.session + ":",
                          "-n", name, quote(["bash", script])).stdout.strip()
         self.tmux("pipe-pane", "-O", "-t", pane, "cat >> " + shlex.quote(str(self.directory / f"{name}.log")))
@@ -186,6 +204,22 @@ class Launcher:
             time.sleep(0.25)
         raise RuntimeError(f"registration/startup timeout: {names[-1]}; inspect manager.log and its NF log. "
                            "Check the actual IID/SID/core, and rebuild X-IO/control NFs if ONVM libraries differ.")
+
+    def wait_queues(self, names, timeout=10):
+        """Require actual RX/TX observations, including zero, for every worker."""
+        path = self.directory / "queues.csv"
+        fields = [f'nf{w["instance"]}_{direction}' for w in self.config["workers"] for direction in ("rx", "tx")]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.healthy(names)
+            if path.exists():
+                with path.open(newline="") as stream:
+                    for row in csv.DictReader(stream):
+                        if all((row.get(field) or "").isdigit() for field in fields):
+                            return
+            time.sleep(0.25)
+        raise RuntimeError("qcheck startup timeout: missing worker RX/TX samples; inspect qcheck.log. "
+                           "Check DPDK telemetry and the configured worker instance IDs.")
 
     def start(self):
         files, jobs = prepare(self.config, self.directory)
@@ -213,6 +247,8 @@ class Launcher:
                 names.append(j["name"])
                 if j["name"] == "manager":
                     self.wait("Running RX thread for RX queue", names)
+                elif j["name"] == "qcheck":
+                    self.wait_queues(names)
                 else:
                     iid, sid, core = j["identity"]
                     self.wait(rf"\b{iid}\s*/\s*{sid}\s*/\s*{core}\s+", names)
@@ -223,7 +259,8 @@ class Launcher:
             print("Startup failed; stopping this run's processes. Logs and panes are retained.", file=sys.stderr)
             self.stop()
             raise
-        print(f"All NFs registered on expected cores. Logs: {self.directory}\n"
+        print(f"All NFs registered on expected cores; qcheck is sampling worker queues on core {self.config['monitor_core']}.\n"
+              f"Logs: {self.directory}; queue samples: queues.csv\n"
               "Now start gNB/UEs; verify PDU establishment, then warm each UE with traffic.")
 
     def stop(self):
@@ -231,7 +268,7 @@ class Launcher:
             print("No tmux session for this run.")
             return
         panes = self.panes()
-        order = [*reversed(NFS), "upfc", *sorted(n for n in panes if n.startswith("upfu-")), "manager"]
+        order = ["qcheck", *reversed(NFS), "upfc", *sorted(n for n in panes if n.startswith("upfu-")), "manager"]
         for name in order:
             if name not in panes or panes[name][1]:
                 continue
@@ -265,7 +302,8 @@ def main():
         if args.action == "check":
             _, jobs = prepare(config, lab.directory)
             for j in jobs:
-                print(j["name"] + ": " + quote(j["argv"]))
+                redirect = " > " + shlex.quote(str(lab.directory / j["stdout"])) if j.get("stdout") else ""
+                print(j["name"] + ": " + quote(j["argv"]) + redirect)
             print(f"Input checks passed; no processes started. Logs will be in {lab.directory}")
         elif args.action == "attach":
             os.execvp("tmux", ["tmux", "-L", SOCKET, "attach", "-t", "=" + lab.session])

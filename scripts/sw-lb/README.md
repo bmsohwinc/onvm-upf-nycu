@@ -1,8 +1,8 @@
 # Software-LB CN launcher
 
 Run on the CN node from the **sw-lb-upf checkout**. Starts MongoDB, manager,
-UPF-C, all configured UPF-U workers, and the nine control NFs. Each process has
-a tmux window and log, like the SR-IOV experiment launcher.
+UPF-C, all configured UPF-U workers, the nine control NFs, and qcheck on a separate
+core. Each process has a tmux window and log, like the SR-IOV experiment launcher.
 
 ## First use
 
@@ -27,12 +27,17 @@ Edit `scripts/sw-lb/config.json`:
   to JSON `null` to use ARP on that port. These are destination MACs, not CN MACs.
 - `workers`: defaults to instances 14–17 on cores 3–6. Keep just the entries
   needed for a 1/2/3-worker experiment; the launcher generates the matching map.
+- `monitor_core`: qcheck CPU, default **19**, separate from manager and all NFs.
+- `queue_interval_s`: sampling interval, default **0.2 seconds**, matching the
+  SR-IOV launcher. `queue_threshold`: RX occupancy for status events, default
+  **40 packets**; it does not change forwarding or trigger scaling. Existing
+  configs can omit these three fields and use the defaults.
 
 `${LAB_HOME}` resolves to the invoking user's home, even under sudo.
 `${UPF_REPO}` resolves to the checkout containing this script.
 
 The fixed CPU layout is manager 0–2, UPF-C 7, workers 3–6, control NFs as listed
-in `control_cores`. Service 1 is reserved for workers and service/instance 2 for
+in `control_cores`, qcheck 19. Service 1 is reserved for workers and service/instance 2 for
 UPF-C. Duplicate cores/instance IDs and missing executables fail before startup.
 The EAL prefix is `rte`, matching the JSON-based control-NF integration.
 
@@ -69,8 +74,9 @@ Keep PFs in Linux for N2 and remove old experiment steering to other VF pairs
 using your existing NIC setup procedure. Confirm PCI-to-port enumeration in EAL.
 
 Startup waits for manager RX and for each NF's **expected instance/service/core**
-to appear in manager stats. Controls retain two-second launch spacing. A timeout
-or early exit stops this run's processes, keeping logs/panes for diagnosis.
+to appear in manager stats, then starts qcheck and requires valid RX/TX queue
+samples for every configured worker. Controls retain two-second launch spacing.
+A timeout or early exit stops this run's processes, keeping logs/panes for diagnosis.
 Registration is not a PFCP/SBI/session health check. If a control NF appears on
 the wrong core, check the X-IO build's ONVM manual-core-assignment fix; `taskset`
 alone does not stop ONVM from reassigning its polling core.
@@ -90,6 +96,44 @@ grep 'Session established' /dev/shm/upf-experiments/sw01/cn/upfc.log
 grep 'UPF LB learned' /dev/shm/upf-experiments/sw01/cn/manager.log
 ```
 
+## Queue capture
+
+qcheck starts automatically with `start` and stops with `stop`. It reuses the
+SR-IOV telemetry sampler in `scripts/qcheck.py`, selecting the configured worker
+**instance IDs** and shared ports **0 (N3)** / **1 (N6)**. It requires the manager's
+DPDK telemetry socket `/var/run/dpdk/rte/dpdk_telemetry.v2` and its `/ring/info`,
+`/mempool/info`, and `/ethdev/stats` endpoints. No dataplane rebuild is needed for
+this launcher change if your existing DPDK build provides these endpoints.
+
+Files under `/dev/shm/upf-experiments/sw01/cn/`:
+
+- `queues.csv`: timestamped samples, flushed after every row. `nf14_rx` /
+  `nf14_tx` are worker 14's ONVM input/output ring occupancies in packets, with
+  corresponding capacity columns; likewise for each other configured worker.
+  RX measures packets waiting for the worker; TX measures packets waiting for
+  manager forwarding. These rings combine UL and DL traffic. Ports 0/1 provide
+  aggregate NIC packet rates and error/drop counters, not per-worker rates.
+- `qcheck.log`: CPU affinity, RX threshold transitions, and one-second status
+  summaries. `peak` is the largest **sampled** RX occupancy since the previous
+  summary. The CSV retains occupancies both below and above the threshold.
+
+`time_ns` is Unix wall-clock nanoseconds; `elapsed_s` is monotonic capture time.
+Record the start/end time and offered rate of each traffic phase to match queue
+samples to RTT measurements. SR-IOV's dynamic mode labels columns by `slotN`;
+SW-LB's fixed mode uses `nf<instance>`, matching `config/map.conf` and `resolved.json`.
+
+Sampling is sequential, not an atomic snapshot. Missing readings are blank,
+never assumed zero; `sample_ms` and `interval_overrun` expose slow sampling.
+Short queue bursts between samples can be missed, and these are **software ring
+occupancies**, not hardware RX/TX queue depths or packets already dequeued into
+processing batches. Empty samples therefore do not establish absence of queueing.
+Use the same interval for both designs; smaller intervals increase telemetry work
+in the manager as well as in the pinned qcheck client.
+
+```bash
+tail -f /dev/shm/upf-experiments/sw01/cn/qcheck.log
+```
+
 ## Inspect and stop
 
 ```bash
@@ -101,8 +145,8 @@ sudo -E bash scripts/sw-lb/cn.sh scripts/sw-lb/config.json sw01 stop
 
 Tmux: **Ctrl-b w** selects a window; **Ctrl-b d** detaches. `status` reports
 process liveness, not session health. The idle `control` window remains alive.
-`stop` sends Ctrl-C only to this run's panes: controls, UPF-C, workers, manager
-last. It leaves MongoDB running, retains results, and never clears subscriber
+`stop` sends Ctrl-C only to this run's panes: qcheck, controls, UPF-C, workers,
+manager last. It leaves MongoDB running, retains results, and never clears subscriber
 data or force-kills hung processes. A stop timeout leaves remaining processes
 running for inspection. Copy `/dev/shm` results to persistent storage before reboot.
 
@@ -110,6 +154,7 @@ running for inspection. Copy `/dev/shm` results to persistent storage before reb
 
 ```bash
 python3 tests/test_sw_lb_launcher.py
+python3 tests/test_qcheck.py
 bash -n scripts/sw-lb/cn.sh
 ```
 
