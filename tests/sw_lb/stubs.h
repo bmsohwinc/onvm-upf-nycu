@@ -8,6 +8,7 @@
 #include <string.h>
 #include "upf_sw_lb.h"
 #define MAX_NFS 128
+#define ONVM_NUM_RX_THREADS 1
 #define PACKET_READ_SIZE 32
 #define RTE_CACHE_LINE_SIZE 64
 #define SESS_BUF_MAX_USERS 1024

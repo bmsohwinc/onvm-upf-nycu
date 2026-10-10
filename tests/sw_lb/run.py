@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix="upf-sw-lb-") as tmp:
     flush.write_text('#include "stubs.h"\n' + "\n".join(functions))
     config = tmp / "map.conf"
     config.write_text("n3 0 10.10.2.11\nn6 1 10.10.3.11\n"
-                      "session 0x1001 10.60.0.1 14\nsession 0x1002 10.60.0.2 15\n")
+                      "worker 14\nworker 15\n")
     for flow_lookup in [False, True]:
         binary = str(tmp / f"test_runtime_{flow_lookup}")
         subprocess.run(FLAGS + (["-DFLOW_LOOKUP"] if flow_lookup else []) + sources +

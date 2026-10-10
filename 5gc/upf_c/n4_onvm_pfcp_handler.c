@@ -21,6 +21,7 @@
 #include <endian.h>
 #include <arpa/inet.h>
 #include <net/if.h>
+#include <inttypes.h>
 
 #include <rte_memory.h>
 
@@ -1698,6 +1699,15 @@ Status UpfN4HandleSessionEstablishmentRequest(UpfSession *session, PfcpXact *pfc
     UTLT_Assert(status == STATUS_OK, return STATUS_ERROR,
                 "xact commit error");
 
+    if (cause == PFCP_CAUSE_REQUEST_ACCEPTED) {
+        /* Session fields are host order. This is only a log: manager learns
+         * worker ownership from packets, independently of the control plane. */
+        struct in_addr ue = {.s_addr = htonl(session->ueIpv4.addr4.s_addr)};
+        char ue_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &ue, ue_ip, sizeof(ue_ip));
+        UTLT_Info("[PFCP] Session established: SEID=%" PRIu64 " UE=%s UL_TEID=%u (0x%08x)",
+                  session->upfSeid, ue_ip, session->teid, session->teid);
+    }
     UTLT_Info("[PFCP] Session Establishment Response");
     return STATUS_OK;
 }

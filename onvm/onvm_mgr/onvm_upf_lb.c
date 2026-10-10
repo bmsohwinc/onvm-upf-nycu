@@ -1,6 +1,8 @@
 #include "onvm_mgr.h"
 #include "onvm_nf.h"
 #include "onvm_upf_lb.h"
+#include "onvm_init.h"
+#include <arpa/inet.h>
 
 struct upf_sw_lb *onvm_upf_lb;
 const char *onvm_upf_lb_path;
@@ -9,6 +11,8 @@ _Static_assert(UPF_SW_LB_WORKERS == MAX_NFS, "UPF LB instance limit must match O
 void
 onvm_upf_lb_init(void) {
     if (!onvm_upf_lb_path) return;
+    if (ONVM_NUM_RX_THREADS != 1)
+        rte_exit(EXIT_FAILURE, "UPF packet learning requires one manager RX thread\n");
     const struct rte_memzone *mz = rte_memzone_reserve_aligned(
         UPF_SW_LB_MZ, sizeof(struct upf_sw_lb), rte_socket_id(), 0, RTE_CACHE_LINE_SIZE);
     if (!mz) rte_exit(EXIT_FAILURE, "Cannot reserve UPF software LB configuration\n");
@@ -22,8 +26,8 @@ onvm_upf_lb_init(void) {
     }
     if (!n3_found || !n6_found || ONVM_NF_SHARE_CORES)
         rte_exit(EXIT_FAILURE, "UPF LB requires enabled N3/N6 ports and dedicated worker cores\n");
-    printf("UPF software LB: %u sessions, %u workers, N3=%u N6=%u, leader instance=%u\n",
-           onvm_upf_lb->route_count, onvm_upf_lb->worker_count,
+    printf("UPF software LB: packet-learned round robin, %u workers, N3=%u N6=%u, leader instance=%u\n",
+           onvm_upf_lb->worker_count,
            onvm_upf_lb->n3_port, onvm_upf_lb->n6_port, onvm_upf_lb->leader);
 }
 
@@ -55,6 +59,18 @@ onvm_upf_lb_dispatch(struct queue_mgr *mgr, struct rte_mbuf *pkt) {
         id = upf_sw_lb_classify(onvm_upf_lb, pkt->port,
                                rte_pktmbuf_mtod(pkt, const uint8_t *), rte_pktmbuf_data_len(pkt));
     if (id > 0) {
+        if (onvm_upf_lb->last_learned.instance) {
+            struct upf_sw_lb_route *r = &onvm_upf_lb->last_learned;
+            struct in_addr address = {.s_addr = htonl(r->ue_ip)};
+            char ip[INET_ADDRSTRLEN], teid[40];
+            inet_ntop(AF_INET, &address, ip, sizeof(ip));
+            if (r->teid) snprintf(teid, sizeof(teid), "%u (0x%08x)", r->teid, r->teid);
+            else snprintf(teid, sizeof(teid), "pending first UL");
+            printf("UPF LB learned: UE=%s UL_TEID=%s instance=%u worker_sessions=%u total_sessions=%u\n",
+                   ip, teid, r->instance, onvm_upf_lb->worker_sessions[r->instance],
+                   onvm_upf_lb->route_count);
+            r->instance = 0;
+        }
         enqueue_instance(mgr, pkt, id);
     } else if (id == UPF_SW_LB_ARP) {
         /* Independent mbufs: workers modify metadata and may generate replies.

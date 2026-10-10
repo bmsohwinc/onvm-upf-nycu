@@ -15,7 +15,7 @@ uint8_t g_nat_enabled;
 uint16_t g_n3_port = 0, g_n6_port = 1;
 uint32_t g_n3_ip_be, g_n6_ip_be;
 static struct rte_memzone zone;
-static unsigned freed, fallback, ack_count, ack_version, drained, drain_owner, drain_index;
+static unsigned freed, fallback, ack_count, ack_version, drained, drain_owner, drain_index, session_lookups;
 static int copy_fail, ack_fail;
 static UpfSession sessions[] = {{0, 0x0a3c0001}, {33, 0x0a3c0002}};
 
@@ -56,6 +56,7 @@ int UpfSendEvt1(uint16_t sid, uint32_t type, uintptr_t version) {
     ack_count++; ack_version = version; return 0;
 }
 UpfSession *UpfSessionFindByUeIP(uint32_t ip) {
+    session_lookups++;
     for (unsigned i = 0; i < 2; i++) if (sessions[i].ue_ip == ip) return &sessions[i];
     return NULL;
 }
@@ -111,6 +112,8 @@ int main(int argc, char **argv) {
     onvm_pkt_process_rx_batch(&q, batch, 40);
     assert(rings[0].count == 20 && rings[1].count == 20 && !fallback);
     assert(nfs[14].stats.rx == 20 && nfs[15].stats.rx == 20);
+    assert(onvm_upf_lb->route_count == 2 && onvm_upf_lb->teid_count == 2 && !session_lookups);
+    assert(onvm_upf_lb->worker_sessions[14] == 1 && onvm_upf_lb->worker_sessions[15] == 1);
     assert(rings[1].packets[0]->meta.destination == 1 && rings[1].packets[0]->meta.chain_index == 1);
     empty(&rings[0]); empty(&rings[1]);
     for (unsigned i = 0; i < 40; i++) batch[i] = packet(1);
@@ -128,7 +131,8 @@ int main(int argc, char **argv) {
     nfs[15].service_id = 2; assert(onvm_upf_lb_dispatch(&q, packet(2)) == 1); nfs[15].service_id = 1;
     assert(nfs[15].stats.rx_drop == 4);
     unsigned before = freed;
-    batch[0] = packet(99); batch[1] = packet(1); batch[1]->nb_segs = 2;
+    batch[0] = packet(99); batch[0]->data[14] = 0x65; /* malformed, not a new session */
+    batch[1] = packet(1); batch[1]->nb_segs = 2;
     onvm_pkt_process_rx_batch(&q, batch, 2); assert(freed == before + 2);
     batch[0] = packet(1); batch[0]->port = 7;
     onvm_pkt_process_rx_batch(&q, batch, 1); assert(fallback == 1);

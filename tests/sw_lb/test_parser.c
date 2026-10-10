@@ -7,7 +7,7 @@
 
 static struct upf_sw_lb lb;
 static const char *base = "n3 0 10.10.2.11\nn6 1 10.10.3.11\n";
-static const char *routes = "session 0x1001 10.60.0.1 14\nsession 0x1002 10.60.0.2 15\n";
+static const char *workers = "worker 14\nworker 15\n";
 static void w16(uint8_t *p, unsigned v) { p[0] = v >> 8; p[1] = v; }
 static void w32(uint8_t *p, uint32_t v) { w16(p, v >> 16); w16(p + 2, v); }
 
@@ -24,12 +24,12 @@ static int load(const char *text) {
 
 static void config(void) {
     char buf[512];
-    snprintf(buf, sizeof(buf), "%s%s", base, routes);
+    snprintf(buf, sizeof(buf), "%s%s", base, workers);
     assert(load(buf) == 0);
-    assert(lb.worker_count == 2 && lb.leader == 14 && lb.route_count == 2);
-    assert(upf_sw_lb_lookup(&lb, 0x0a3c0001)->instance == 14);
+    assert(lb.worker_count == 2 && lb.leader == 14 && !lb.route_count && !lb.teid_count);
+    assert(!upf_sw_lb_lookup(&lb, 0x0a3c0001));
     assert(!upf_sw_lb_lookup(&lb, 0x0a3c0003));
-    assert(upf_sw_lb_lookup_teid(&lb, 0x1001)->instance == 14);
+    assert(!upf_sw_lb_lookup_teid(&lb, 0x1001));
     assert(!upf_sw_lb_lookup_teid(&lb, 0x1003));
 }
 
@@ -83,11 +83,13 @@ int main(void) {
                             free(short_p);
                         }
                     }
+    assert(lb.route_count == 2 && lb.teid_count == 2);
+    assert(lb.worker_sessions[14] == 1 && lb.worker_sessions[15] == 1);
     size_t n = packet(good, 1, 1, 17, 1, 0);
     memcpy(p, good, n); w32(p + 46, 0x1002); /* another UE's TEID */
     assert(upf_sw_lb_classify(&lb, 0, p, n) == 15); /* TEID alone selects owner */
     memcpy(p, good, n); w32(p + 46, 0x1003); /* unknown TEID, known inner UE */
-    assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP); /* second TEID for same UE */
     memcpy(p, good, n); w32(p + 62 + 12, 0x0a3c0063); /* unknown inner UE */
     assert(upf_sw_lb_classify(&lb, 0, p, n) == 14);
     memcpy(p, good, n); memset(p + 62, 0, n - 62); /* no valid inner IP/L4 */
@@ -112,7 +114,11 @@ int main(void) {
         assert(upf_sw_lb_classify(&lb, 0, p, 42 + bytes) == UPF_SW_LB_DROP);
     }
     n = packet(p, 0, 3, 17, 0, 0);
-    assert(upf_sw_lb_classify(&lb, 1, p, n) == UPF_SW_LB_DROP);
+    assert(upf_sw_lb_classify(&lb, 1, p, n) == 14); /* round robin wraps */
+    assert(lb.route_count == 3 && lb.teid_count == 2 && lb.worker_sessions[14] == 2);
+    n = packet(p, 1, 3, 17, 1, 0);
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == 14); /* DL-first owner retained */
+    assert(lb.route_count == 3 && lb.teid_count == 3 && lb.worker_sessions[14] == 2);
     assert(upf_sw_lb_classify(&lb, 9, NULL, 0) == 0);
     n = packet(p, 0, 1, 1, 0, 0); w32(p + 30, 0x0a0a030b);
     assert(upf_sw_lb_classify(&lb, 1, p, n) == 14); /* local ICMP */
@@ -139,35 +145,68 @@ int main(void) {
     assert(!upf_sw_lb_all_seen(&lb, 4) && !upf_sw_lb_all_seen(&lb, 3));
 
     const char *bad[] = {
-        "session 0x1001 10.60.0.2 15\n", /* duplicate TEID */
-        "session 0x1002 10.60.0.1 15\n", /* duplicate UE */
-        "session 0 10.60.0.2 15\n", "session 0x1002 10.60.0.2 128\n",
-        "session 0x1002 10.60.0.2 0\n", "session -1 10.60.0.2 15\n",
-        "session 4294967296 10.60.0.2 15\n", "session 2 10.60.0.999 15\n",
-        "session 2 10.60.0.2 15 extra\n", "session 2 10.10.2.11 15\n",
-        "n3 4 10.10.2.11\n", "unknown 1 2\n"
+        "worker 14\n", /* duplicate worker */
+        "worker 0\n", "worker 128\n", "worker -1\n", "worker +1\n",
+        "worker 4294967296\n", "worker 15 extra\n", "worker\n",
+        "session 0x1001 10.60.0.1 14\n", /* old config rejected explicitly */
+        "n3 4 10.10.2.11\n", "n6 1 10.10.999.1\n", "unknown 1 2\n"
     };
     for (unsigned i = 0; i < sizeof(bad)/sizeof(bad[0]); i++) {
         char buf[512];
-        snprintf(buf, sizeof(buf), "%ssession 0x1001 10.60.0.1 14\n%s", base, bad[i]);
+        snprintf(buf, sizeof(buf), "%sworker 14\n%s", base, bad[i]);
         assert(load(buf) < 0);
     }
     assert(load(base) < 0);
-    assert(load(routes) < 0);
-    assert(load("n3 0 10.10.2.11\nn6 0 10.10.3.11\nsession 1 10.60.0.1 14\n") < 0);
+    assert(load(workers) < 0);
+    assert(load("n3 0 10.10.2.11\nn6 0 10.10.3.11\nworker 14\n") < 0);
+
+    /* A first UL must safely learn through optional/extensions and IPv4 options.
+     * Truncated/bad discovery packets must not consume a round-robin slot. */
+    for (int ext = 0; ext < 3; ext++)
+        for (int opt = 0; opt < 2; opt++) {
+            config();
+            n = packet(p, 1, 1, 17, ext, opt);
+            for (size_t cut = 0; cut < n; cut++) {
+                uint8_t *short_p = malloc(cut ? cut : 1);
+                memcpy(short_p, p, cut);
+                assert(upf_sw_lb_classify(&lb, 0, short_p, cut) == UPF_SW_LB_DROP);
+                free(short_p);
+                assert(!lb.route_count && !lb.teid_count && !lb.next_worker);
+            }
+            assert(upf_sw_lb_classify(&lb, 0, p, n) == 14);
+            n = packet(p, 0, 1, 17, 0, 0);
+            assert(upf_sw_lb_classify(&lb, 1, p, n) == 14);
+            assert(lb.route_count == 1 && lb.teid_count == 1 && lb.worker_sessions[14] == 1);
+        }
+    config();
+    n = packet(good, 1, 1, 17, 1, 0);
+    memcpy(p, good, n); p[54] = 0;
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
+    memcpy(p, good, n); p[54] = 255;
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
+    memcpy(p, good, n); p[62] = 0x65; /* inner IPv6 */
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
+    memcpy(p, good, n); w32(p + 46, 0); /* zero TEID */
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
+    memcpy(p, good, n); w32(p + 62 + 12, 0); /* zero UE IP */
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
+    assert(!lb.route_count && !lb.teid_count && !lb.next_worker);
 
     /* Exercise both hash tables at capacity, including collision chains,
      * full-width TEIDs and multiple sessions sharing each worker. */
-    char many[100000];
-    size_t used = (size_t)snprintf(many, sizeof(many), "%s", base);
-    for (unsigned i = 1; i <= 1024; i++)
-        used += (size_t)snprintf(many + used, sizeof(many) - used,
-                                "session 0x%x 10.60.%u.%u %u\n",
-                                UINT32_MAX - i + 1, i >> 8, i & 255, 14 + i % 4);
-    assert(load(many) == 0 && lb.route_count == 1024 && lb.worker_count == 4);
+    char many[1024];
+    snprintf(many, sizeof(many), "%sworker 17\nworker 14\nworker 16\nworker 15\n", base);
+    assert(load(many) == 0 && !lb.route_count && lb.worker_count == 4);
+    const int order[] = {17, 14, 16, 15};
     for (unsigned i = 1; i <= 1024; i++) {
         uint32_t teid = UINT32_MAX - i + 1;
-        int owner = 14 + i % 4;
+        int owner = order[(i - 1) % 4];
+        if (i % 2) {
+            n = packet(p, 0, i, 17, 0, 0);
+            assert(upf_sw_lb_classify(&lb, 1, p, n) == owner);
+        }
+        n = packet(p, 1, i, 17, 0, 0); w32(p + 46, teid);
+        assert(upf_sw_lb_classify(&lb, 0, p, n) == owner);
         assert(upf_sw_lb_lookup(&lb, 0x0a3c0000 + i)->teid == teid);
         assert(upf_sw_lb_lookup_teid(&lb, teid)->ue_ip == 0x0a3c0000 + i);
         n = packet(p, 0, i, 17, 0, 0);
@@ -175,10 +214,20 @@ int main(void) {
         n = packet(p, 1, i, 17, 0, 0); w32(p + 46, teid);
         assert(upf_sw_lb_classify(&lb, 0, p, n) == owner);
     }
+    assert(lb.route_count == 1024 && lb.teid_count == 1024);
+    for (unsigned i = 14; i <= 17; i++) assert(lb.worker_sessions[i] == 256);
     assert(!upf_sw_lb_lookup(&lb, 0x0a3d0001));
     assert(!upf_sw_lb_lookup_teid(&lb, 0x12345678));
-    snprintf(many + used, sizeof(many) - used, "session 1 10.61.0.1 14\n");
-    assert(load(many) < 0);
-    puts("parser/config/affinity/truncation/fuzz/ACK barrier: PASS");
+    n = packet(p, 1, 1025, 17, 0, 0);
+    assert(upf_sw_lb_classify(&lb, 0, p, n) == UPF_SW_LB_DROP);
+    n = packet(p, 0, 1025, 17, 0, 0);
+    assert(upf_sw_lb_classify(&lb, 1, p, n) == UPF_SW_LB_DROP);
+    assert(lb.route_count == 1024 && lb.teid_count == 1024);
+    size_t used = (size_t)snprintf(many, sizeof(many), "%s", base);
+    for (unsigned i = 1; i <= 33; i++) {
+        used += (size_t)snprintf(many + used, sizeof(many) - used, "worker %u\n", i);
+        assert((load(many) == 0) == (i <= 32));
+    }
+    puts("packet learning/round robin/UL-DL affinity/capacity/truncation/fuzz/ACK barrier: PASS");
     return 0;
 }

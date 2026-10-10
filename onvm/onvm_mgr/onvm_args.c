@@ -231,7 +231,7 @@ usage(void) {
             "\t-v VERBOCITY_LEVEL: verbocity level of the stats output (optional)\n"
             "\t-c ENABLE_SHARED_CORE: allow the NFs to share a core based on mutex sleep/wakeups (optional)\n"
             "\t-j JUMBO_FRAMES: allow the ports to send and receive jumbo frames (optional)\n"
-            "\t--upf-lb FILE: static TEID/UE-IP to UPF instance map (optional)\n",
+            "\t--upf-lb FILE: N3/N6 and worker list for packet-learned round robin (optional)\n",
             progname);
 }
 

@@ -24,7 +24,7 @@ upf_u_lb_init(struct onvm_nf *nf) {
     if (instance >= UPF_SW_LB_WORKERS || !lb->workers[instance] || nf->service_id != UPF_U_SERVICE_ID ||
         g_nat_enabled || g_n3_port != lb->n3_port || g_n6_port != lb->n6_port ||
         rte_be_to_cpu_32(g_n3_ip_be) != lb->n3_ip || rte_be_to_cpu_32(g_n6_ip_be) != lb->n6_ip) {
-        UTLT_Error("UPF LB: require mapped instance, service 1, matching N3/N6 ports/IPs, NAT disabled");
+        UTLT_Error("UPF LB: require configured instance, service 1, matching N3/N6 ports/IPs, NAT disabled");
         return -1;
     }
     /* Restarting a worker loses its private meters/shaper/ARP state. Require a
@@ -77,13 +77,15 @@ void
 upf_u_lb_relay_drain(int session_index) {
     if (session_index < 0 || session_index >= SESS_BUF_MAX_USERS) return;
     /* UPF-C still addresses service 1. Resolve this rare control event to the
-     * same owner as packets, preserving each session ring's single consumer. */
+     * learned owner, preserving each session ring's single consumer. Entries
+     * are append-only; acquire the instance before reading its immutable UE IP. */
     for (unsigned i = 0; i < UPF_SW_LB_CAPACITY; i++) {
         const struct upf_sw_lb_route *r = &lb->routes[i];
-        if (!r->instance) continue;
+        unsigned owner = __atomic_load_n(&r->instance, __ATOMIC_ACQUIRE);
+        if (!owner) continue;
         const UpfSession *s = UpfSessionFindByUeIP(r->ue_ip);
         if (!s || s->index != session_index) continue;
-        struct upf_sw_lb_worker *state = &lb->state[r->instance];
+        struct upf_sw_lb_worker *state = &lb->state[owner];
         __atomic_fetch_or(&state->drain[session_index / 64], UINT64_C(1) << (session_index % 64), __ATOMIC_RELEASE);
         __atomic_store_n(&state->drain_pending, 1, __ATOMIC_RELEASE);
         return;
